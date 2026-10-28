@@ -1,36 +1,82 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Időpontfoglaló prototípus
 
-## Getting Started
+Next.js alapú vendégfoglalás-minta motorszervizek számára, Supabase
+adatbázissal és Auth-tal, valamint Resend e-mail-küldéssel.
 
-First, run the development server:
+## Helyi fejlesztés
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+1. Telepítsd a függőségeket:
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+   ```bash
+   npm install
+   ```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+2. Másold a `.env.example` fájlt `.env.local` néven, és töltsd ki:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+   - `NEXT_PUBLIC_SUPABASE_URL`: a Supabase projekt URL-je.
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: a Supabase publishable/anon kulcs.
+   - `SUPABASE_SERVICE_ROLE_KEY`: kizárólag szerveroldali service role kulcs;
+     soha ne nevezd át `NEXT_PUBLIC_` változóra és ne tedd klienskódba.
+   - `RESEND_API_KEY`: Resend API-kulcs.
+   - `RESEND_FROM_EMAIL`: a Resendben hitelesített feladó, például
+     `Időpontfoglaló <foglalas@pelda.hu>`.
 
-## Learn More
+3. Futtasd a Supabase SQL Editorban az eredeti adatbázis-sémát, majd **külön
+   lekérdezésként** a
+   [`supabase/migrations/20261028190000_harden_booking_security.sql`](./supabase/migrations/20261028190000_harden_booking_security.sql)
+   migrációt. Ne cseréld le az eredeti SQL-t a migrációra. Előtte készíts
+   adatbázis-mentést, és oldd fel a migráció által jelzett esetleges átfedő
+   aktív foglalásokat.
 
-To learn more about Next.js, take a look at the following resources:
+4. Hozz létre egy platform-admin felhasználót a Supabase Authban, majd a SQL
+   Editorban add hozzá az admin táblához:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+   ```sql
+   insert into public.platform_admins (user_id)
+   select id from auth.users where email = 'admin@example.com';
+   ```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+   A platform-admin céget jóváhagyó RPC-je:
+   `select public.set_company_status('<company-uuid>', 'active');`.
+   A dashboardos szolgáltatói felhasználónak a cég `owner_id` mezőjében
+   szereplő Auth-felhasználónak kell lennie.
 
-## Deploy on Vercel
+5. Töltsd fel a `company_business_hours` táblát. A `weekday` értéke
+   `0 = vasárnap` ... `6 = szombat`; a napi nyitvatartás időzónája a
+   `companies.time_zone` mező.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+6. Indítsd el az alkalmazást:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+   ```bash
+   npm run dev
+   ```
+
+   - Szolgáltatói belépés: `http://localhost:3000/dashboard/login`
+   - Dashboard: `http://localhost:3000/dashboard`
+   - Publikus foglalás: `http://localhost:3000/<ceg-slug>`
+
+## Elkészült folyamatok
+
+- Bejelentkezett cég-tulajdonosi dashboard: közelgő visszaigazolt foglalások,
+  jármű- és ügyféladatok, kézi blokkolások létrehozása és törlése.
+- A blokkolás mentése és törlése a migráció jogosultság-ellenőrző
+  adatbázis-függvényein keresztül történik.
+- Publikus foglalás: cég szolgáltatása, dátumhoz kötött szabad időpontok,
+  járműadatok, ötperces zárolás, ügyféladatok, véglegesítés.
+- Sikeres foglaláskor e-mail megy az ügyfélnek és a cég tulajdonosának; az
+  üzenet Google Naptár-linket és ICS-naptárfájlt tartalmaz.
+- A foglalás adatbázisban való véglegesítése akkor is megmarad, ha az e-mail
+  konfigurációja hiányzik vagy a kézbesítés sikertelen; ilyen esetben a
+  foglaló figyelmeztetést jelenít meg.
+
+## Ismert prototípus-korlátok
+
+- A 24 órás automatikus emlékeztető és ütemezett levélküldés még nincs
+  megvalósítva.
+- A szolgáltató Auth-fiókját, cégét, szolgáltatásait és heti nyitvatartását a
+  jelenlegi prototípusban a platform-admin állítja be.
+- A jogi PDF-eket a `public/aszf.pdf` és
+  `public/adatvedelmi-tajekoztato.pdf` helyekre kell elhelyezni a publikus
+  oldal élesítése előtt.
+- A foglalás megerősítése és az e-mail-küldés egy kérésben történik; nagyobb
+  üzembiztonsághoz adatbázis-outbox és újrapróbálható háttérfolyamat szükséges.

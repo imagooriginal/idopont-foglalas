@@ -1,0 +1,149 @@
+// --- Típusdefiníciók ---
+
+export type BookingStatus = 'confirmed' | 'pending' | 'cancelled';
+
+export interface BusinessHours {
+  start: string; // HH:mm formátum, pl. '08:00'
+  end: string;   // HH:mm formátum, pl. '17:00'
+}
+
+export interface Booking {
+  id: string;
+  start: string; // HH:mm
+  end: string;   // HH:mm
+  status: BookingStatus;
+  lockedUntil?: Date; // Opcionális, csak 'pending' esetén releváns
+}
+
+export interface ManualBlockout {
+  start: string; // HH:mm
+  end: string;   // HH:mm
+}
+
+export interface CalculateSlotsParams {
+  date: Date;
+  businessHours: BusinessHours;
+  serviceDuration: number; // percben
+  existingBookings: Booking[];
+  manualBlockouts: ManualBlockout[];
+}
+
+interface TimeRange {
+  startMin: number;
+  endMin: number;
+}
+
+// --- Segédfüggvények ---
+
+/**
+ * Átalakítja a "HH:mm" formátumot a nap kezdete óta eltelt percekre.
+ */
+function timeToMinutes(time: string): number {
+  const [hours, minutes] = time.split(':').map(Number);
+  return hours * 60 + minutes;
+}
+
+/**
+ * Visszaalakítja a perceket "HH:mm" formátumú stringgé.
+ */
+function minutesToTime(minutes: number): string {
+  const h = Math.floor(minutes / 60).toString().padStart(2, '0');
+  const m = (minutes % 60).toString().padStart(2, '0');
+  return `${h}:${m}`;
+}
+
+/**
+ * Ellenőrzi, hogy két idősáv fedi-e egymást.
+ */
+function isOverlapping(slot: TimeRange, block: TimeRange): boolean {
+  // Egy idősáv átfedi a másikat, ha az egyik kezdete hamarabb van, mint a másik vége, 
+  // ÉS az egyik vége később van, mint a másik kezdete.
+  return slot.startMin < block.endMin && slot.endMin > block.startMin;
+}
+
+/**
+ * Kiszűri és egységes TimeRange formátumra hozza a ténylegesen blokkolt idősávokat.
+ */
+function getBlockedRanges(
+  bookings: Booking[],
+  blockouts: ManualBlockout[],
+  now: Date
+): TimeRange[] {
+  const blockedRanges: TimeRange[] = [];
+
+  // Manuális blokkolások feldolgozása
+  for (const block of blockouts) {
+    blockedRanges.push({
+      startMin: timeToMinutes(block.start),
+      endMin: timeToMinutes(block.end),
+    });
+  }
+
+  // Foglalások feldolgozása
+  for (const booking of bookings) {
+    const isConfirmed = booking.status === 'confirmed';
+    const isLockedPending =
+      booking.status === 'pending' &&
+      booking.lockedUntil &&
+      booking.lockedUntil > now;
+
+    if (isConfirmed || isLockedPending) {
+      blockedRanges.push({
+        startMin: timeToMinutes(booking.start),
+        endMin: timeToMinutes(booking.end),
+      });
+    }
+  }
+
+  return blockedRanges;
+}
+
+// --- Fő függvény ---
+
+/**
+ * Kiszámolja a megadott napra a foglalható idősávokat.
+ */
+export function calculateAvailableSlots({
+  date,
+  businessHours,
+  serviceDuration,
+  existingBookings,
+  manualBlockouts,
+}: CalculateSlotsParams): string[] {
+  const availableSlots: string[] = [];
+  
+  // Ezt az időpontot használjuk a pending foglalások lejáratának ellenőrzéséhez
+  const now = new Date(); 
+
+  const startOfDayMin = timeToMinutes(businessHours.start);
+  const endOfDayMin = timeToMinutes(businessHours.end);
+
+  // Összegyűjtjük az összes foglalt időszakot
+  const blockedRanges = getBlockedRanges(existingBookings, manualBlockouts, now);
+
+  // Idősávok generálása és szűrése
+  let currentSlotStart = startOfDayMin;
+
+  while (currentSlotStart + serviceDuration <= endOfDayMin) {
+    const currentSlotEnd = currentSlotStart + serviceDuration;
+    
+    const currentSlotRange: TimeRange = {
+      startMin: currentSlotStart,
+      endMin: currentSlotEnd,
+    };
+
+    // Megnézzük, van-e átfedés bármelyik blokkolt időszakkal
+    const hasConflict = blockedRanges.some((block) =>
+      isOverlapping(currentSlotRange, block)
+    );
+
+    if (!hasConflict) {
+      availableSlots.push(minutesToTime(currentSlotStart));
+    }
+
+    // Lépés a következő idősávra
+    currentSlotStart += serviceDuration;
+  }
+
+  return availableSlots;
+}
