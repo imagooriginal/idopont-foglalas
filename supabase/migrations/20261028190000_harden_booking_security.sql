@@ -85,13 +85,39 @@ revoke all on function public.can_manage_company(uuid) from public;
 grant execute on function public.can_access_company(uuid) to anon, authenticated;
 grant execute on function public.can_manage_company(uuid) to authenticated;
 
-alter table public.companies
-  add constraint companies_status_check
-    check (status in ('pending', 'active', 'suspended')),
-  add constraint companies_slot_interval_check
-    check (slot_interval_minutes between 5 and 240),
-  add constraint companies_business_hours_check
-    check (nyitvatartas_kezdet < nyitvatartas_vege);
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.companies'::regclass
+      and conname = 'companies_status_check'
+  ) then
+    alter table public.companies
+      add constraint companies_status_check
+      check (status in ('pending', 'active', 'suspended'));
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.companies'::regclass
+      and conname = 'companies_slot_interval_check'
+  ) then
+    alter table public.companies
+      add constraint companies_slot_interval_check
+      check (slot_interval_minutes between 5 and 240);
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.companies'::regclass
+      and conname = 'companies_business_hours_check'
+  ) then
+    alter table public.companies
+      add constraint companies_business_hours_check
+      check (nyitvatartas_kezdet < nyitvatartas_vege);
+  end if;
+end;
+$$;
 
 create table if not exists public.company_business_hours (
   id uuid primary key default gen_random_uuid(),
@@ -104,20 +130,58 @@ create table if not exists public.company_business_hours (
   check (opens_at < closes_at)
 );
 
-alter table public.services
-  add constraint services_duration_positive_check
-    check (idotartam_percben between 1 and 1440),
-  add constraint services_price_nonnegative_check
-    check (ar >= 0),
-  add constraint services_id_company_id_key unique (id, cég_id);
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.services'::regclass
+      and conname = 'services_duration_positive_check'
+  ) then
+    alter table public.services
+      add constraint services_duration_positive_check
+      check (idotartam_percben between 1 and 1440);
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.services'::regclass
+      and conname = 'services_price_nonnegative_check'
+  ) then
+    alter table public.services
+      add constraint services_price_nonnegative_check check (ar >= 0);
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.services'::regclass
+      and conname = 'services_id_company_id_key'
+  ) then
+    alter table public.services
+      add constraint services_id_company_id_key unique (id, cég_id);
+  end if;
+end;
+$$;
 
 alter table public.bookings
   alter column ugyfel_nev drop not null,
   alter column ugyfel_email drop not null,
-  add column jarmu_marka text,
-  add column jarmu_modell text,
-  add column jarmu_rendszam text,
-  add column lock_token uuid unique;
+  add column if not exists jarmu_marka text,
+  add column if not exists jarmu_modell text,
+  add column if not exists jarmu_rendszam text,
+  add column if not exists lock_token uuid;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.bookings'::regclass
+      and conname = 'bookings_lock_token_key'
+  ) then
+    alter table public.bookings
+      add constraint bookings_lock_token_key unique (lock_token);
+  end if;
+end;
+$$;
 
 alter table public.bookings
   drop constraint if exists bookings_service_id_fkey;
@@ -132,20 +196,48 @@ set lock_token = gen_random_uuid()
 where status = 'pending'
   and lock_token is null;
 
-alter table public.bookings
-  add constraint bookings_valid_time_check
-    check (vege_ideje > kezdes_ideje),
-  add constraint bookings_service_company_fkey
-    foreign key (service_id, cég_id)
-    references public.services (id, cég_id);
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.bookings'::regclass
+      and conname = 'bookings_valid_time_check'
+  ) then
+    alter table public.bookings
+      add constraint bookings_valid_time_check
+      check (vege_ideje > kezdes_ideje);
+  end if;
 
-alter table public.manual_blockouts
-  add constraint manual_blockouts_valid_time_check
-    check (vege_ideje > kezdes_ideje);
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.bookings'::regclass
+      and conname = 'bookings_service_company_fkey'
+  ) then
+    alter table public.bookings
+      add constraint bookings_service_company_fkey
+      foreign key (service_id, cég_id)
+      references public.services (id, cég_id);
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.manual_blockouts'::regclass
+      and conname = 'manual_blockouts_valid_time_check'
+  ) then
+    alter table public.manual_blockouts
+      add constraint manual_blockouts_valid_time_check
+      check (vege_ideje > kezdes_ideje);
+  end if;
+end;
+$$;
 
 do $$
 begin
-  if exists (
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.bookings'::regclass
+      and conname = 'bookings_no_overlapping_active_periods'
+  ) and exists (
     select 1
     from public.bookings a
     join public.bookings b
@@ -159,16 +251,22 @@ begin
     raise exception
       'Overlapping active bookings exist. Resolve them before applying the exclusion constraint.';
   end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.bookings'::regclass
+      and conname = 'bookings_no_overlapping_active_periods'
+  ) then
+    alter table public.bookings
+      add constraint bookings_no_overlapping_active_periods
+      exclude using gist (
+        cég_id with =,
+        tstzrange(kezdes_ideje, vege_ideje, '[)') with &&
+      )
+      where (status in ('pending', 'confirmed'));
+  end if;
 end;
 $$;
-
-alter table public.bookings
-  add constraint bookings_no_overlapping_active_periods
-  exclude using gist (
-    cég_id with =,
-    tstzrange(kezdes_ideje, vege_ideje, '[)') with &&
-  )
-  where (status in ('pending', 'confirmed'));
 
 alter table public.companies enable row level security;
 alter table public.services enable row level security;
@@ -185,6 +283,20 @@ drop policy if exists "Bárki létrehozhat foglalást" on public.bookings;
 drop policy if exists "Tulajdonos kezelheti a foglalásait" on public.bookings;
 drop policy if exists "Bárki láthatja a blokkolt időpontokat" on public.manual_blockouts;
 drop policy if exists "Tulajdonos kezelheti a blokkolásokat" on public.manual_blockouts;
+drop policy if exists "Public can read active companies" on public.companies;
+drop policy if exists "Owners can create pending companies" on public.companies;
+drop policy if exists "Owners can update their companies" on public.companies;
+drop policy if exists "Platform admins can manage companies" on public.companies;
+drop policy if exists "Public can read active company services" on public.services;
+drop policy if exists "Owners can create services" on public.services;
+drop policy if exists "Owners can update services" on public.services;
+drop policy if exists "Owners can delete services" on public.services;
+drop policy if exists "Platform admins can manage services" on public.services;
+drop policy if exists "Owners and admins can read bookings" on public.bookings;
+drop policy if exists "Owners and admins can read blockouts" on public.manual_blockouts;
+drop policy if exists "Owners and admins can read working hours" on public.company_business_hours;
+drop policy if exists "Owners can manage working hours" on public.company_business_hours;
+drop policy if exists "Platform admins can manage working hours" on public.company_business_hours;
 
 create policy "Public can read active companies"
 on public.companies for select

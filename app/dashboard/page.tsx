@@ -98,10 +98,32 @@ export default async function DashboardPage({
   if (servicesResult.error) {
     throw new Error(`Szolgáltatások betöltése nem sikerült: ${servicesResult.error.message}`);
   }
+  const bookingIds = (bookingsResult.data ?? []).map((booking) => booking.id);
+  const bookingServicesResult = bookingIds.length
+    ? await supabase
+        .from("booking_services")
+        .select("booking_id, service_id, service_order")
+        .eq("cég_id", company.id)
+        .in("booking_id", bookingIds)
+        .order("service_order", { ascending: true })
+    : null;
+
+  if (bookingServicesResult?.error) {
+    throw new Error(`Foglalási szolgáltatások betöltése nem sikerült: ${bookingServicesResult.error.message}`);
+  }
 
   const serviceNames = new Map(
     (servicesResult.data ?? []).map((service) => [service.id, service.nev]),
   );
+  const serviceNamesByBooking = new Map<string, string[]>();
+  for (const item of bookingServicesResult?.data ?? []) {
+    const serviceName = serviceNames.get(item.service_id);
+    if (!serviceName) continue;
+
+    const names = serviceNamesByBooking.get(item.booking_id) ?? [];
+    names.push(serviceName);
+    serviceNamesByBooking.set(item.booking_id, names);
+  }
   const timeZone = company.time_zone || "Europe/Budapest";
 
   return (
@@ -169,7 +191,9 @@ export default async function DashboardPage({
                     </time>
                   </div>
                   <p className="mt-1 text-sm text-slate-600">
-                    {serviceNames.get(booking.service_id) || "Szolgáltatás"}
+                    {serviceNamesByBooking.get(booking.id)?.join(" + ") ||
+                      serviceNames.get(booking.service_id) ||
+                      "Szolgáltatás"}
                     {" · "}
                     {formatDate(booking.kezdes_ideje, timeZone)}
                     {" – "}

@@ -119,26 +119,46 @@ export async function POST(request: Request) {
 
     if (bookingError) throw new Error(`Foglalás betöltése nem sikerült: ${bookingError.message}`);
 
-    const [companyResult, serviceResult] = await Promise.all([
+    const [companyResult, bookingServicesResult] = await Promise.all([
       admin
         .from("companies")
         .select("id, nev, owner_id, time_zone")
         .eq("id", booking.cég_id)
         .single(),
       admin
-        .from("services")
-        .select("id, nev")
-        .eq("id", booking.service_id)
-        .eq("cég_id", booking.cég_id)
-        .single(),
+        .from("booking_services")
+        .select("service_id, service_order")
+        .eq("booking_id", booking.id)
+        .order("service_order", { ascending: true }),
     ]);
 
     if (companyResult.error) {
       throw new Error(`Szolgáltató betöltése nem sikerült: ${companyResult.error.message}`);
     }
-    if (serviceResult.error) {
-      throw new Error(`Szolgáltatás betöltése nem sikerült: ${serviceResult.error.message}`);
+    if (bookingServicesResult.error) {
+      throw new Error(`Foglalási szolgáltatások betöltése nem sikerült: ${bookingServicesResult.error.message}`);
     }
+
+    const serviceIds = bookingServicesResult.data.length
+      ? bookingServicesResult.data.map((item) => item.service_id)
+      : [booking.service_id];
+    const { data: services, error: servicesError } = await admin
+      .from("services")
+      .select("id, nev")
+      .eq("cég_id", booking.cég_id)
+      .in("id", serviceIds);
+
+    if (servicesError) {
+      throw new Error(`Szolgáltatások betöltése nem sikerült: ${servicesError.message}`);
+    }
+
+    const serviceNames = serviceIds
+      .map((id) => services.find((service) => service.id === id)?.nev)
+      .filter((name): name is string => Boolean(name));
+    if (serviceNames.length !== serviceIds.length) {
+      throw new Error("A foglalás egyik szolgáltatása nem található.");
+    }
+    const serviceName = serviceNames.join(" + ");
 
     const { data: ownerResult, error: ownerError } =
       await admin.auth.admin.getUserById(companyResult.data.owner_id);
@@ -157,9 +177,9 @@ export async function POST(request: Request) {
       timeStyle: "short",
       timeZone,
     }).format(end);
-    const description = `${serviceResult.data.nev} – ${companyResult.data.nev}. Ügyfél: ${booking.ugyfel_nev}.`;
+    const description = `${serviceName} – ${companyResult.data.nev}. Ügyfél: ${booking.ugyfel_nev}.`;
     const calendarEvent = {
-      title: `${serviceResult.data.nev} – ${companyResult.data.nev}`,
+      title: `${serviceName} – ${companyResult.data.nev}`,
       description,
       start,
       end,
@@ -172,7 +192,7 @@ export async function POST(request: Request) {
       html: createBookingEmailHtml({
         greeting: `Kedves ${booking.ugyfel_nev}!`,
         companyName: companyResult.data.nev,
-        serviceName: serviceResult.data.nev,
+        serviceName,
         customerName: booking.ugyfel_nev,
         start: startLabel,
         end: endLabel,
@@ -191,7 +211,7 @@ export async function POST(request: Request) {
         html: createBookingEmailHtml({
           greeting: `Új foglalás: ${booking.ugyfel_nev}`,
           companyName: companyResult.data.nev,
-          serviceName: serviceResult.data.nev,
+          serviceName,
           customerName: booking.ugyfel_nev,
           start: startLabel,
           end: endLabel,

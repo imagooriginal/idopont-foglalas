@@ -23,10 +23,14 @@ adatbázissal és Auth-tal, valamint Resend e-mail-küldéssel.
 
 3. Futtasd a Supabase SQL Editorban az eredeti adatbázis-sémát, majd **külön
    lekérdezésként** a
-   [`supabase/migrations/20261028190000_harden_booking_security.sql`](./supabase/migrations/20261028190000_harden_booking_security.sql)
-   migrációt. Ne cseréld le az eredeti SQL-t a migrációra. Előtte készíts
-   adatbázis-mentést, és oldd fel a migráció által jelzett esetleges átfedő
-   aktív foglalásokat.
+   [`supabase/migrations/20261028190000_harden_booking_security.sql`](./supabase/migrations/20261028190000_harden_booking_security.sql),
+   majd a
+   [`supabase/migrations/20261029110000_fixed_grid_slots.sql`](./supabase/migrations/20261029110000_fixed_grid_slots.sql)
+   majd a
+   [`supabase/migrations/20261029130000_multiple_booking_services.sql`](./supabase/migrations/20261029130000_multiple_booking_services.sql)
+   migrációt. Ne cseréld le az eredeti SQL-t a migrációkra. Előtte készíts
+   adatbázis-mentést, és oldd fel az első migráció által jelzett esetleges
+   átfedő aktív foglalásokat.
 
 4. Hozz létre egy platform-admin felhasználót a Supabase Authban, majd a SQL
    Editorban add hozzá az admin táblához:
@@ -63,6 +67,12 @@ adatbázissal és Auth-tal, valamint Resend e-mail-küldéssel.
   adatbázis-függvényein keresztül történik.
 - Publikus foglalás: cég szolgáltatása, dátumhoz kötött szabad időpontok,
   járműadatok, ötperces zárolás, ügyféladatok, véglegesítés.
+- A kezdési időpontokat a cég `slot_interval_minutes` rácsa határozza meg
+  (alapértelmezésben 30 perc); elérhetőséghez a szolgáltatás által igényelt
+  teljes rácsblokknak szabadnak kell lennie.
+- Egy foglalás több szolgáltatást is tartalmazhat; ezek időtartama összeadódik,
+  és a szolgáltatások a foglaláshoz kapcsolva a dashboardon és az értesítőben is
+  megjelennek.
 - Sikeres foglaláskor e-mail megy az ügyfélnek és a cég tulajdonosának; az
   üzenet Google Naptár-linket és ICS-naptárfájlt tartalmaz.
 - A foglalás adatbázisban való véglegesítése akkor is megmarad, ha az e-mail

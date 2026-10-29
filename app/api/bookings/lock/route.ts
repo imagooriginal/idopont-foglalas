@@ -5,7 +5,7 @@ const uuidPattern =
 
 interface LockRequest {
   companyId?: unknown;
-  serviceId?: unknown;
+  serviceIds?: unknown;
   start?: unknown;
   vehicleMake?: unknown;
   vehicleModel?: unknown;
@@ -23,8 +23,13 @@ export async function POST(request: Request) {
   if (
     typeof body.companyId !== "string" ||
     !uuidPattern.test(body.companyId) ||
-    typeof body.serviceId !== "string" ||
-    !uuidPattern.test(body.serviceId) ||
+    !Array.isArray(body.serviceIds) ||
+    !body.serviceIds.length ||
+    body.serviceIds.some(
+      (serviceId) =>
+        typeof serviceId !== "string" || !uuidPattern.test(serviceId),
+    ) ||
+    new Set(body.serviceIds).size !== body.serviceIds.length ||
     typeof body.start !== "string" ||
     !Number.isFinite(new Date(body.start).getTime()) ||
     typeof body.vehicleMake !== "string" ||
@@ -37,7 +42,7 @@ export async function POST(request: Request) {
   const supabase = createSupabasePublicClient();
   const { data, error } = await supabase.rpc("create_booking_lock", {
     p_company_id: body.companyId,
-    p_service_id: body.serviceId,
+    p_service_ids: body.serviceIds,
     p_start: new Date(body.start).toISOString(),
     p_vehicle_make: body.vehicleMake,
     p_vehicle_model: body.vehicleModel,

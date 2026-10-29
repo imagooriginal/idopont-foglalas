@@ -10,10 +10,15 @@ export async function GET(
 ) {
   const { companySlug } = await params;
   const url = new URL(request.url);
-  const serviceId = url.searchParams.get("serviceId") ?? "";
+  const serviceIds = (url.searchParams.get("serviceIds") ?? "").split(",");
   const day = url.searchParams.get("day") ?? "";
 
-  if (!uuidPattern.test(serviceId) || !datePattern.test(day)) {
+  if (
+    !serviceIds.length ||
+    serviceIds.some((serviceId) => !uuidPattern.test(serviceId)) ||
+    new Set(serviceIds).size !== serviceIds.length ||
+    !datePattern.test(day)
+  ) {
     return Response.json({ error: "Érvénytelen szolgáltatás vagy dátum." }, { status: 400 });
   }
 
@@ -40,7 +45,7 @@ export async function GET(
 
   const { data, error } = await supabase.rpc("list_available_slots", {
     p_company_id: company.id,
-    p_service_id: serviceId,
+    p_service_ids: serviceIds,
     p_day: day,
   });
 

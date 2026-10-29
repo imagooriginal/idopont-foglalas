@@ -24,6 +24,7 @@ export interface CalculateSlotsParams {
   date: Date;
   businessHours: BusinessHours;
   serviceDuration: number; // percben
+  slotIntervalMinutes: number;
   existingBookings: Booking[];
   manualBlockouts: ManualBlockout[];
 }
@@ -107,9 +108,17 @@ export function calculateAvailableSlots({
   date,
   businessHours,
   serviceDuration,
+  slotIntervalMinutes,
   existingBookings,
   manualBlockouts,
 }: CalculateSlotsParams): string[] {
+  if (!Number.isInteger(serviceDuration) || serviceDuration <= 0) {
+    throw new RangeError('A szolgáltatás időtartamának pozitív egész számnak kell lennie.');
+  }
+  if (!Number.isInteger(slotIntervalMinutes) || slotIntervalMinutes <= 0) {
+    throw new RangeError('Az időpontok lépésközének pozitív egész számnak kell lennie.');
+  }
+
   const availableSlots: string[] = [];
   
   // Ezt az időpontot használjuk a pending foglalások lejáratának ellenőrzéséhez
@@ -117,6 +126,8 @@ export function calculateAvailableSlots({
 
   const startOfDayMin = timeToMinutes(businessHours.start);
   const endOfDayMin = timeToMinutes(businessHours.end);
+  const slotDuration =
+    Math.ceil(serviceDuration / slotIntervalMinutes) * slotIntervalMinutes;
 
   // Összegyűjtjük az összes foglalt időszakot
   const blockedRanges = getBlockedRanges(existingBookings, manualBlockouts, now);
@@ -125,7 +136,7 @@ export function calculateAvailableSlots({
   let currentSlotStart = startOfDayMin;
 
   while (currentSlotStart + serviceDuration <= endOfDayMin) {
-    const currentSlotEnd = currentSlotStart + serviceDuration;
+    const currentSlotEnd = currentSlotStart + slotDuration;
     
     const currentSlotRange: TimeRange = {
       startMin: currentSlotStart,
@@ -142,7 +153,7 @@ export function calculateAvailableSlots({
     }
 
     // Lépés a következő idősávra
-    currentSlotStart += serviceDuration;
+    currentSlotStart += slotIntervalMinutes;
   }
 
   return availableSlots;

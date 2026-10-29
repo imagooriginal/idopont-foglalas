@@ -13,6 +13,7 @@ interface BookingWidgetProps {
   companyId: string;
   companyName: string;
   companySlug: string;
+  slotIntervalMinutes: number;
   timeZone: string;
   initialDay: string;
   services: Service[];
@@ -34,12 +35,13 @@ export default function BookingWidget({
   companyId,
   companyName,
   companySlug,
+  slotIntervalMinutes,
   timeZone,
   initialDay,
   services,
 }: BookingWidgetProps) {
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
-  const [selectedService, setSelectedService] = useState<Service | null>(null);
+  const [selectedServices, setSelectedServices] = useState<Service[]>([]);
   const [selectedDay, setSelectedDay] = useState(initialDay);
   const [slotResult, setSlotResult] = useState<{
     key: string;
@@ -61,9 +63,18 @@ export default function BookingWidget({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const selectedServiceIds = selectedServices.map((service) => service.id);
+  const totalServiceDuration = selectedServices.reduce(
+    (total, service) => total + service.idotartam_percben,
+    0,
+  );
+  const totalServicePrice = selectedServices.reduce(
+    (total, service) => total + Number(service.ar),
+    0,
+  );
   const slotRequestKey =
-    selectedService && selectedDay
-      ? `${companySlug}:${selectedService.id}:${selectedDay}`
+    selectedServices.length && selectedDay
+      ? `${companySlug}:${selectedServiceIds.join(",")}:${selectedDay}`
       : "";
   const slots =
     slotResult?.key === slotRequestKey ? slotResult.slots : [];
@@ -71,13 +82,15 @@ export default function BookingWidget({
     step === 2 && Boolean(slotRequestKey) && slotResult?.key !== slotRequestKey;
 
   useEffect(() => {
-    if (step !== 2 || !selectedService || !selectedDay) return;
+    if (step !== 2 || !selectedServices.length || !selectedDay) return;
 
     const controller = new AbortController();
-    const requestKey = `${companySlug}:${selectedService.id}:${selectedDay}`;
+    const serviceIdsForRequest = selectedServices.map((service) => service.id);
+    const requestKey = `${companySlug}:${serviceIdsForRequest.join(",")}:${selectedDay}`;
+    const serviceIds = encodeURIComponent(serviceIdsForRequest.join(","));
 
     fetch(
-      `/api/companies/${encodeURIComponent(companySlug)}/slots?serviceId=${encodeURIComponent(selectedService.id)}&day=${encodeURIComponent(selectedDay)}`,
+      `/api/companies/${encodeURIComponent(companySlug)}/slots?serviceIds=${serviceIds}&day=${encodeURIComponent(selectedDay)}`,
       { signal: controller.signal },
     )
       .then(async (response) => {
@@ -103,7 +116,7 @@ export default function BookingWidget({
         );
       })
     return () => controller.abort();
-  }, [companySlug, selectedDay, selectedService, step]);
+  }, [companySlug, selectedDay, selectedServices, step]);
 
   useEffect(() => {
     if (step !== 3 || !lock) return;
@@ -127,7 +140,7 @@ export default function BookingWidget({
   }, [lock, step]);
 
   async function handleSelectSlot(slot: string) {
-    if (!selectedService) return;
+    if (!selectedServices.length) return;
 
     setLoading(true);
     setError("");
@@ -137,7 +150,7 @@ export default function BookingWidget({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           companyId,
-          serviceId: selectedService.id,
+          serviceIds: selectedServiceIds,
           start: slot,
           vehicleMake: vehicle.make,
           vehicleModel: vehicle.model,
@@ -208,7 +221,7 @@ export default function BookingWidget({
 
   function reset() {
     setStep(1);
-    setSelectedService(null);
+    setSelectedServices([]);
     setSlotResult(null);
     setVehicle({ make: "", model: "", registration: "" });
     setCustomer({ name: "", email: "", phone: "" });
@@ -244,7 +257,7 @@ export default function BookingWidget({
           <div>
             <h2 className="text-xl font-bold">1. Jármű és szolgáltatás</h2>
             <p className="mt-1 text-sm text-slate-600">
-              Válassz egy szolgáltatást, és add meg a jármű adatait.
+              Válassz egy vagy több szolgáltatást, és add meg a jármű adatait.
             </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-3">
@@ -292,45 +305,86 @@ export default function BookingWidget({
             </label>
           </div>
 
-          <fieldset className="space-y-3">
-            <legend className="mb-3 text-sm font-semibold text-slate-800">
-              Válassz egy szolgáltatást
-            </legend>
-            {services.map((service) => (
-              <button
-                aria-pressed={selectedService?.id === service.id}
-                className={`flex w-full items-center justify-between gap-4 rounded-xl border p-4 text-left transition ${
-                  selectedService?.id === service.id
-                    ? "border-blue-700 bg-blue-50 ring-1 ring-blue-700"
-                    : "border-slate-200 hover:border-blue-400 hover:bg-slate-50"
-                }`}
-                key={service.id}
-                onClick={() => setSelectedService(service)}
-                type="button"
+          <div className="space-y-3">
+            <label
+              className="block space-y-1.5 text-sm font-semibold text-slate-800"
+              htmlFor="service-selection"
+            >
+              Szolgáltatások
+              <select
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-normal"
+                disabled={!services.length}
+                id="service-selection"
+                onChange={(event) => {
+                  const service = services.find(
+                    (item) => item.id === event.target.value,
+                  );
+                  if (
+                    service &&
+                    !selectedServices.some((item) => item.id === service.id)
+                  ) {
+                    setSelectedServices((current) => [...current, service]);
+                  }
+                }}
+                value=""
               >
-                <span>
-                  <span className="block font-semibold text-slate-950">
-                    {service.nev}
-                  </span>
-                  <span className="mt-1 block text-sm text-slate-600">
+                <option disabled value="">
+                  Kérjük, válasszon szolgáltatást...
+                </option>
+                {services.map((service) => (
+                  <option key={service.id} value={service.id}>
+                    {service.nev} - {Number(service.ar).toLocaleString("hu-HU")} Ft -{" "}
                     {service.idotartam_percben} perc
-                  </span>
-                </span>
-                <span className="whitespace-nowrap font-semibold text-slate-900">
-                  {Number(service.ar).toLocaleString("hu-HU")} Ft
-                </span>
-              </button>
-            ))}
+                  </option>
+                ))}
+              </select>
+            </label>
             {services.length === 0 && (
               <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
                 Jelenleg nincs foglalható szolgáltatás.
               </p>
             )}
-          </fieldset>
+            {selectedServices.length > 0 && (
+              <div className="rounded-xl border border-slate-200 p-4">
+                <h3 className="font-semibold text-slate-900">
+                  Kiválasztott szolgáltatások
+                </h3>
+                <ul className="mt-2 divide-y divide-slate-100">
+                  {selectedServices.map((service) => (
+                    <li
+                      className="flex items-center justify-between gap-3 py-2 first:pt-0 last:pb-0"
+                      key={service.id}
+                    >
+                      <span className="text-sm text-slate-700">
+                        {service.nev} · {Number(service.ar).toLocaleString("hu-HU")} Ft ·{" "}
+                        {service.idotartam_percben} perc
+                      </span>
+                      <button
+                        aria-label={`${service.nev} eltávolítása`}
+                        className="shrink-0 text-sm font-medium text-red-700 hover:underline"
+                        onClick={() =>
+                          setSelectedServices((current) =>
+                            current.filter((item) => item.id !== service.id),
+                          )
+                        }
+                        type="button"
+                      >
+                        Eltávolítás
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-3 border-t border-slate-100 pt-3 text-sm font-semibold text-slate-900">
+                  Összesen: {totalServicePrice.toLocaleString("hu-HU")} Ft ·{" "}
+                  {totalServiceDuration} perc
+                </p>
+              </div>
+            )}
+          </div>
           <button
             className="w-full rounded-lg bg-blue-700 px-4 py-3 font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
             disabled={
-              !selectedService ||
+              !selectedServices.length ||
               !vehicle.make.trim() ||
               !vehicle.model.trim() ||
               !vehicle.registration.trim()
@@ -343,7 +397,7 @@ export default function BookingWidget({
         </div>
       )}
 
-      {step === 2 && selectedService && (
+      {step === 2 && selectedServices.length > 0 && (
         <div>
           <button
             className="mb-4 text-sm font-medium text-blue-700 hover:underline"
@@ -354,7 +408,11 @@ export default function BookingWidget({
           </button>
           <h2 className="text-xl font-bold">2. Válassz időpontot</h2>
           <p className="mt-1 text-sm text-slate-600">
-            {selectedService.nev} · {selectedService.idotartam_percben} perc
+            {selectedServices.map((service) => service.nev).join(" + ")} ·{" "}
+            {totalServiceDuration} perc összesen
+          </p>
+          <p className="mt-1 text-sm text-slate-600">
+            A kezdési időpontok {slotIntervalMinutes} perces rácsban érhetők el.
           </p>
           <label className="mt-5 block max-w-xs space-y-1.5 text-sm font-medium">
             Nap

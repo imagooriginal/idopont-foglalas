@@ -42,12 +42,14 @@ export default async function CompanyBookingPage({
   const supabase = createSupabasePublicClient();
   const { data: company, error: companyError } = await supabase
     .from("companies")
-    .select("id, nev, slug, time_zone")
+    .select("id, nev, slug, time_zone, slot_interval_minutes")
     .eq("slug", companySlug)
     .maybeSingle();
 
   if (companyError) {
-    console.error("Public company lookup failed", companyError);
+    console.error(
+      `Public company lookup failed: ${companyError.code} ${companyError.message}; details=${companyError.details}; hint=${companyError.hint}`,
+    );
     throw new Error("A szolgáltató adatainak betöltése nem sikerült.");
   }
   if (!company) notFound();
@@ -71,6 +73,7 @@ export default async function CompanyBookingPage({
         companyId={company.id}
         companyName={company.nev}
         companySlug={company.slug}
+        slotIntervalMinutes={company.slot_interval_minutes}
         initialDay={getLocalDay(timeZone)}
         services={services ?? []}
         timeZone={timeZone}
