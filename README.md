@@ -59,6 +59,25 @@ adatbázissal és Auth-tal, valamint Resend e-mail-küldéssel.
    - Dashboard: `http://localhost:3000/dashboard`
    - Publikus foglalás: `http://localhost:3000/<ceg-slug>`
 
+## Tesztelés
+
+Futtasd az egyszeri tesztcsomagot:
+
+```bash
+npm test
+```
+
+A tesztek lefedettségméréssel és az LCOV-riport előállításával:
+
+```bash
+npm run test:coverage
+```
+
+A lefedettségi riport szöveges összesítése a terminálon jelenik meg, az LCOV
+fájl pedig a `coverage/lcov.info` helyre kerül. A CI ezt a parancsot futtatja,
+és legalább 80% utasítás-, függvény- és sorkód-lefedettséget, valamint 75%
+ág-lefedettséget vár el.
+
 ## Elkészült folyamatok
 
 - Bejelentkezett cég-tulajdonosi dashboard: közelgő visszaigazolt foglalások,

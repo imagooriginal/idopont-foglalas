@@ -23,7 +23,7 @@ jobs:
         run: npm ci
 
       - name: Tesztek futtatása lefedettség méréssel
-        run: npm run test:coverage # Be kell állítanod a package.json-ban, hogy generáljon lcov.info fájlt
+        run: npm run test:coverage # LCOV riport: coverage/lcov.info
 
       - name: Next.js Build ellenőrzése
         run: npm run build
@@ -33,4 +33,3 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }} # Ezt a tokent a GitHub repód Secrets beállításaiba kell elmentened
-#teszt pr
