@@ -1,6 +1,6 @@
 // --- Típusdefiníciók ---
 
-export type BookingStatus = 'confirmed' | 'pending' | 'cancelled';
+export type BookingStatus = "confirmed" | "pending" | "cancelled";
 
 export interface BusinessHours {
   start: string; // HH:mm formátum, pl. '08:00'
@@ -104,14 +104,14 @@ function getBlockedRanges(
 /**
  * Kiszámolja a megadott napra a foglalható idősávokat.
  */
-export function calculateAvailableSlots({
-  date,
-  businessHours,
-  serviceDuration,
-  slotIntervalMinutes,
-  existingBookings,
-  manualBlockouts,
-}: CalculateSlotsParams): string[] {
+export function calculateAvailableSlots(params: CalculateSlotsParams): string[] {
+  const {
+    businessHours,
+    serviceDuration,
+    slotIntervalMinutes,
+    existingBookings,
+    manualBlockouts,
+  } = params;
   if (!Number.isInteger(serviceDuration) || serviceDuration <= 0) {
     throw new RangeError('A szolgáltatás időtartamának pozitív egész számnak kell lennie.');
   }
