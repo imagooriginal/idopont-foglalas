@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const supabase = vi.hoisted(() => ({ rpc: vi.fn() }));
+const supabase = vi.hoisted(() => ({
+  rpc: vi.fn(),
+  auth: { getUser: vi.fn() },
+}));
 
-vi.mock("../lib/supabase/public", () => ({
-  createSupabasePublicClient: () => supabase,
+vi.mock("../lib/supabase/server", () => ({
+  createSupabaseServerClient: async () => supabase,
 }));
 
 vi.mock("../lib/supabase/admin", () => ({
@@ -27,6 +30,15 @@ describe("booking confirmation route", () => {
     vi.stubEnv("RESEND_API_KEY", "");
     vi.stubEnv("RESEND_FROM_EMAIL", "");
     supabase.rpc.mockResolvedValue({ data: "booking-1", error: null });
+    supabase.auth.getUser.mockResolvedValue({
+      data: {
+        user: {
+          email: "teszt@example.com",
+          email_confirmed_at: "2030-01-15T08:00:00.000Z",
+        },
+      },
+      error: null,
+    });
   });
 
   afterEach(() => {
@@ -52,6 +64,7 @@ describe("booking confirmation route", () => {
         name: "  Teszt Elek  ",
         email: "  teszt@example.com ",
         phone: "  +3612345678  ",
+        privacyAccepted: true,
       }),
     );
 
@@ -61,12 +74,46 @@ describe("booking confirmation route", () => {
       emailStatus: "not_configured",
       warning: "A foglalás sikeres, de az e-mail-küldés nincs beállítva.",
     });
-    expect(supabase.rpc).toHaveBeenCalledWith("confirm_booking", {
+    expect(supabase.rpc).toHaveBeenCalledWith("confirm_booking_with_privacy", {
       p_lock_token: lockToken,
       p_customer_name: "Teszt Elek",
       p_customer_email: "teszt@example.com",
       p_customer_phone: "+3612345678",
+      p_privacy_accepted: true,
+      p_privacy_policy_version: "2026-10-31",
     });
+  });
+
+  it("requires a confirmed matching email before confirming a booking", async () => {
+    supabase.auth.getUser.mockResolvedValue({
+      data: { user: null },
+      error: null,
+    });
+    const response = await POST(
+      request({
+        lockToken,
+        name: "Teszt Elek",
+        email: "teszt@example.com",
+        privacyAccepted: true,
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(supabase.rpc).not.toHaveBeenCalled();
+  });
+
+  it("rejects a booking without explicit privacy acceptance", async () => {
+    const response = await POST(
+      request({
+        lockToken,
+        name: "Teszt Elek",
+        email: "teszt@example.com",
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(supabase.auth.getUser).not.toHaveBeenCalled();
+    expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
   it("reports an expired or invalid lock token as a conflict", async () => {
@@ -80,6 +127,7 @@ describe("booking confirmation route", () => {
         lockToken,
         name: "Teszt Elek",
         email: "teszt@example.com",
+        privacyAccepted: true,
       }),
     );
 

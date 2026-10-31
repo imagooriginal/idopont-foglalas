@@ -42,7 +42,7 @@ export default async function CompanyBookingPage({
   const supabase = createSupabasePublicClient();
   const { data: company, error: companyError } = await supabase
     .from("companies")
-    .select("id, nev, slug, time_zone, slot_interval_minutes")
+    .select("id, nev, slug, time_zone, slot_interval_minutes, primary_color")
     .eq("slug", companySlug)
     .maybeSingle();
 
@@ -58,6 +58,7 @@ export default async function CompanyBookingPage({
     .from("services")
     .select("id, nev, idotartam_percben, ar")
     .eq("cég_id", company.id)
+    .order("display_order", { ascending: true })
     .order("nev", { ascending: true });
 
   if (servicesError) {
@@ -66,6 +67,11 @@ export default async function CompanyBookingPage({
   }
 
   const timeZone = company.time_zone || "Europe/Budapest";
+  const primaryColor =
+    typeof company.primary_color === "string" &&
+    /^#[0-9a-fA-F]{6}$/.test(company.primary_color)
+      ? company.primary_color
+      : "#1d4ed8";
 
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-10 sm:px-6 sm:py-16">
@@ -75,6 +81,7 @@ export default async function CompanyBookingPage({
         companySlug={company.slug}
         slotIntervalMinutes={company.slot_interval_minutes}
         initialDay={getLocalDay(timeZone)}
+        primaryColor={primaryColor}
         services={services ?? []}
         timeZone={timeZone}
       />

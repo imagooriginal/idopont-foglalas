@@ -5,7 +5,9 @@ import {
   createIcsCalendarFile,
 } from "@/lib/calendar";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import { createSupabasePublicClient } from "@/lib/supabase/public";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+
+const privacyPolicyVersion = "2026-10-31";
 
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -15,6 +17,7 @@ interface ConfirmationRequest {
   name?: unknown;
   email?: unknown;
   phone?: unknown;
+  privacyAccepted?: unknown;
 }
 
 interface BookingEmail {
@@ -72,6 +75,7 @@ export async function POST(request: Request) {
     typeof body.email !== "string" ||
     !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim()) ||
     body.email.trim().length > 320 ||
+    body.privacyAccepted !== true ||
     (body.phone !== undefined &&
       body.phone !== null &&
       (typeof body.phone !== "string" || body.phone.trim().length > 40))
@@ -79,15 +83,29 @@ export async function POST(request: Request) {
     return Response.json({ error: "Adj meg érvényes nevet és e-mail-címet." }, { status: 400 });
   }
 
-  const supabase = createSupabasePublicClient();
+  const supabase = await createSupabaseServerClient();
+  const { data: authData, error: authError } = await supabase.auth.getUser();
+  if (
+    authError ||
+    !authData.user?.email_confirmed_at ||
+    authData.user.email?.toLowerCase() !== body.email.trim().toLowerCase()
+  ) {
+    return Response.json(
+      { error: "A foglalás előtt erősítsd meg a megadott e-mail-címet." },
+      { status: 401 },
+    );
+  }
+
   const { data: bookingId, error: confirmError } = await supabase.rpc(
-    "confirm_booking",
+    "confirm_booking_with_privacy",
     {
       p_lock_token: body.lockToken,
       p_customer_name: body.name.trim(),
       p_customer_email: body.email.trim(),
       p_customer_phone:
         typeof body.phone === "string" ? body.phone.trim() || null : null,
+      p_privacy_accepted: true,
+      p_privacy_policy_version: privacyPolicyVersion,
     },
   );
 
