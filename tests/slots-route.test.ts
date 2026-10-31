@@ -30,46 +30,61 @@ describe("available slots route", () => {
       error: null,
     });
     supabase.rpc.mockResolvedValue({
-      data: [{ slot_start: "2030-01-15T09:00:00+01:00" }],
+      data: [
+        {
+          slot_start: "2030-01-15T09:00:00+01:00",
+          is_available: false,
+        },
+      ],
       error: null,
     });
   });
 
-  it("rejects malformed, duplicate, or impossible date parameters", async () => {
+  it("rejects malformed, duplicate, impossible, or non-Monday week starts", async () => {
     const invalidService = await GET(
-      request("serviceIds=invalid&day=2030-01-15"),
+      request("serviceIds=invalid&weekStart=2030-01-14"),
       { params: Promise.resolve({ companySlug: "workshop" }) },
     );
     const duplicateServices = await GET(
-      request(`serviceIds=${serviceId},${serviceId}&day=2030-01-15`),
+      request(`serviceIds=${serviceId},${serviceId}&weekStart=2030-01-14`),
       { params: Promise.resolve({ companySlug: "workshop" }) },
     );
     const impossibleDate = await GET(
-      request(`serviceIds=${serviceId}&day=2030-02-30`),
+      request(`serviceIds=${serviceId}&weekStart=2030-02-30`),
+      { params: Promise.resolve({ companySlug: "workshop" }) },
+    );
+    const nonMonday = await GET(
+      request(`serviceIds=${serviceId}&weekStart=2030-01-15`),
       { params: Promise.resolve({ companySlug: "workshop" }) },
     );
 
     expect(invalidService.status).toBe(400);
     expect(duplicateServices.status).toBe(400);
     expect(impossibleDate.status).toBe(400);
+    expect(nonMonday.status).toBe(400);
     expect(supabase.from).not.toHaveBeenCalled();
   });
 
-  it("returns available slots for a known company", async () => {
+  it("returns all weekly grid slots and their availability for a known company", async () => {
     const response = await GET(
-      request(`serviceIds=${serviceId}&day=2030-01-15`),
+      request(`serviceIds=${serviceId}&weekStart=2030-01-14`),
       { params: Promise.resolve({ companySlug: "workshop" }) },
     );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
-      slots: ["2030-01-15T09:00:00+01:00"],
+      slots: [
+        {
+          slotStart: "2030-01-15T09:00:00+01:00",
+          available: false,
+        },
+      ],
     });
     expect(supabase.eq).toHaveBeenCalledWith("slug", "workshop");
-    expect(supabase.rpc).toHaveBeenCalledWith("list_available_slots", {
+    expect(supabase.rpc).toHaveBeenCalledWith("list_week_slot_grid", {
       p_company_id: "company-1",
       p_service_ids: [serviceId],
-      p_day: "2030-01-15",
+      p_week_start: "2030-01-14",
     });
   });
 
@@ -77,7 +92,7 @@ describe("available slots route", () => {
     supabase.maybeSingle.mockResolvedValue({ data: null, error: null });
 
     const response = await GET(
-      request(`serviceIds=${serviceId}&day=2030-01-15`),
+      request(`serviceIds=${serviceId}&weekStart=2030-01-14`),
       { params: Promise.resolve({ companySlug: "missing" }) },
     );
 
@@ -86,5 +101,23 @@ describe("available slots route", () => {
       error: "A szolgáltató nem található.",
     });
     expect(supabase.rpc).not.toHaveBeenCalled();
+  });
+
+  it("explains how to fix a missing weekly-calendar database migration", async () => {
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: { code: "PGRST202", message: "function not found" },
+    });
+
+    const response = await GET(
+      request(`serviceIds=${serviceId}&weekStart=2030-01-14`),
+      { params: Promise.resolve({ companySlug: "workshop" }) },
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error:
+        "A heti naptár adatbázis-frissítése hiányzik. Futtasd le a 20261031190000_weekly_slot_grid.sql migrációt a Supabase projektben.",
+    });
   });
 });

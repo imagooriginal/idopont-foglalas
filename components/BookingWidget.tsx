@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 interface Service {
   id: string;
@@ -16,6 +17,7 @@ interface BookingWidgetProps {
   slotIntervalMinutes: number;
   timeZone: string;
   initialDay: string;
+  primaryColor: string;
   services: Service[];
 }
 
@@ -31,6 +33,22 @@ interface ApiError {
   emailStatus?: "sent" | "failed" | "not_configured";
 }
 
+interface WeekSlot {
+  slotStart: string;
+  available: boolean;
+}
+
+function addDays(date: string, days: number) {
+  const value = new Date(`${date}T00:00:00.000Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
+function getMonday(date: string) {
+  const day = new Date(`${date}T00:00:00.000Z`).getUTCDay();
+  return addDays(date, day === 0 ? -6 : 1 - day);
+}
+
 export default function BookingWidget({
   companyId,
   companyName,
@@ -38,14 +56,15 @@ export default function BookingWidget({
   slotIntervalMinutes,
   timeZone,
   initialDay,
+  primaryColor,
   services,
 }: BookingWidgetProps) {
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [selectedServices, setSelectedServices] = useState<Service[]>([]);
-  const [selectedDay, setSelectedDay] = useState(initialDay);
+  const [weekStart, setWeekStart] = useState(() => getMonday(initialDay));
   const [slotResult, setSlotResult] = useState<{
     key: string;
-    slots: string[];
+    slots: WeekSlot[];
   } | null>(null);
   const [vehicle, setVehicle] = useState({
     make: "",
@@ -57,6 +76,11 @@ export default function BookingWidget({
     email: "",
     phone: "",
   });
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const [privacyError, setPrivacyError] = useState(false);
+  const [emailCodeSent, setEmailCodeSent] = useState(false);
+  const [emailCode, setEmailCode] = useState("");
+  const [emailVerified, setEmailVerified] = useState(false);
   const [lock, setLock] = useState<LockResponse | null>(null);
   const [timeLeft, setTimeLeft] = useState(300);
   const [emailWarning, setEmailWarning] = useState("");
@@ -73,29 +97,61 @@ export default function BookingWidget({
     0,
   );
   const slotRequestKey =
-    selectedServices.length && selectedDay
-      ? `${companySlug}:${selectedServiceIds.join(",")}:${selectedDay}`
+    selectedServices.length && weekStart
+      ? `${companySlug}:${selectedServiceIds.join(",")}:${weekStart}`
       : "";
-  const slots =
+  const weekSlots =
     slotResult?.key === slotRequestKey ? slotResult.slots : [];
   const loadingSlots =
     step === 2 && Boolean(slotRequestKey) && slotResult?.key !== slotRequestKey;
+  const weekDays = Array.from({ length: 7 }, (_, index) =>
+    addDays(weekStart, index),
+  );
+  const dateFormatter = new Intl.DateTimeFormat("hu-HU", {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+  const slotDateFormatter = new Intl.DateTimeFormat("en-GB", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone,
+  });
+  const slotTimeFormatter = new Intl.DateTimeFormat("hu-HU", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone,
+  });
+  const slotDate = (slot: WeekSlot) => {
+    const parts = Object.fromEntries(
+      slotDateFormatter
+        .formatToParts(new Date(slot.slotStart))
+        .map(({ type, value }) => [type, value]),
+    );
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  };
+  const slotTime = (slot: WeekSlot) =>
+    slotTimeFormatter.format(new Date(slot.slotStart));
+  const timeRows = [...new Set(weekSlots.map(slotTime))].sort();
+  const weekLabel = `${dateFormatter.format(new Date(`${weekStart}T12:00:00.000Z`))} – ${dateFormatter.format(new Date(`${weekDays[6]}T12:00:00.000Z`))}`;
 
   useEffect(() => {
-    if (step !== 2 || !selectedServices.length || !selectedDay) return;
+    if (step !== 2 || !selectedServices.length || !weekStart) return;
 
     const controller = new AbortController();
     const serviceIdsForRequest = selectedServices.map((service) => service.id);
-    const requestKey = `${companySlug}:${serviceIdsForRequest.join(",")}:${selectedDay}`;
+    const requestKey = `${companySlug}:${serviceIdsForRequest.join(",")}:${weekStart}`;
     const serviceIds = encodeURIComponent(serviceIdsForRequest.join(","));
 
     fetch(
-      `/api/companies/${encodeURIComponent(companySlug)}/slots?serviceIds=${serviceIds}&day=${encodeURIComponent(selectedDay)}`,
+      `/api/companies/${encodeURIComponent(companySlug)}/slots?serviceIds=${serviceIds}&weekStart=${encodeURIComponent(weekStart)}`,
       { signal: controller.signal },
     )
       .then(async (response) => {
         const result = (await response.json()) as
-          | { slots: string[] }
+          | { slots: WeekSlot[] }
           | ApiError;
         if (!response.ok || !("slots" in result)) {
           throw new Error(
@@ -116,7 +172,7 @@ export default function BookingWidget({
         );
       })
     return () => controller.abort();
-  }, [companySlug, selectedDay, selectedServices, step]);
+  }, [companySlug, selectedServices, step, weekStart]);
 
   useEffect(() => {
     if (step !== 3 || !lock) return;
@@ -175,9 +231,12 @@ export default function BookingWidget({
       );
       setSlotResult((current) => ({
         key: slotRequestKey,
-        slots: (current?.key === slotRequestKey ? current.slots : []).filter(
-          (value) => value !== slot,
-        ),
+        slots:
+          current?.key === slotRequestKey
+            ? current.slots.map((value) =>
+                value.slotStart === slot ? { ...value, available: false } : value,
+              )
+            : [],
       }));
     } finally {
       setLoading(false);
@@ -191,6 +250,36 @@ export default function BookingWidget({
     setLoading(true);
     setError("");
     try {
+      if (!emailVerified) {
+        const supabase = createSupabaseBrowserClient();
+        if (!emailCodeSent) {
+          const { error: sendError } = await supabase.auth.signInWithOtp({
+            email: customer.email.trim(),
+            options: { shouldCreateUser: true },
+          });
+          if (sendError) {
+            throw new Error(
+              `Az e-mail-megerősítő kód küldése nem sikerült: ${sendError.message}`,
+            );
+          }
+          setEmailCodeSent(true);
+          return;
+        }
+
+        const { error: verifyError } = await supabase.auth.verifyOtp({
+          email: customer.email.trim(),
+          token: emailCode.trim(),
+          type: "email",
+        });
+        if (verifyError) {
+          throw new Error("A kód érvénytelen vagy lejárt. Ellenőrizd, majd próbáld újra.");
+        }
+        setEmailVerified(true);
+        setEmailCode("");
+        setError("");
+        return;
+      }
+
       const response = await fetch("/api/bookings/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -199,6 +288,7 @@ export default function BookingWidget({
           name: customer.name,
           email: customer.email,
           phone: customer.phone,
+          privacyAccepted,
         }),
       });
       const result = (await response.json()) as ApiError;
@@ -225,22 +315,23 @@ export default function BookingWidget({
     setSlotResult(null);
     setVehicle({ make: "", model: "", registration: "" });
     setCustomer({ name: "", email: "", phone: "" });
+    setPrivacyAccepted(false);
+    setPrivacyError(false);
+    setEmailCodeSent(false);
+    setEmailCode("");
+    setEmailVerified(false);
     setLock(null);
     setEmailWarning("");
     setError("");
   }
 
-  const formattedSlot = (value: string) =>
-    new Intl.DateTimeFormat("hu-HU", {
-      hour: "2-digit",
-      minute: "2-digit",
-      timeZone,
-    }).format(new Date(value));
-
   return (
-    <section className="mx-auto w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-900/5 sm:p-8">
+    <section
+      className="mx-auto w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-900/5 sm:p-8"
+      style={{ "--brand-color": primaryColor } as React.CSSProperties}
+    >
       <header className="mb-7 border-b border-slate-100 pb-5">
-        <p className="text-sm font-semibold uppercase tracking-wide text-blue-700">
+        <p className="text-sm font-semibold uppercase tracking-wide text-[var(--brand-color)]">
           Online időpontfoglalás
         </p>
         <h1 className="mt-1 text-2xl font-bold text-slate-950">{companyName}</h1>
@@ -382,7 +473,7 @@ export default function BookingWidget({
             )}
           </div>
           <button
-            className="w-full rounded-lg bg-blue-700 px-4 py-3 font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
+            className="w-full rounded-lg bg-[var(--brand-color)] px-4 py-3 font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             disabled={
               !selectedServices.length ||
               !vehicle.make.trim() ||
@@ -414,38 +505,119 @@ export default function BookingWidget({
           <p className="mt-1 text-sm text-slate-600">
             A kezdési időpontok {slotIntervalMinutes} perces rácsban érhetők el.
           </p>
-          <label className="mt-5 block max-w-xs space-y-1.5 text-sm font-medium">
-            Nap
-            <input
-              className="w-full rounded-lg border border-slate-300 px-3 py-2.5"
-              min={initialDay}
-              onChange={(event) => {
-                setSelectedDay(event.target.value);
+          <div className="mt-5 flex items-center justify-between gap-3">
+            <button
+              aria-label="Előző hét"
+              className="rounded-lg border border-slate-300 px-3 py-2 font-medium text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                setWeekStart((current) => addDays(current, -7));
                 setError("");
               }}
-              type="date"
-              value={selectedDay}
-            />
-          </label>
+              type="button"
+            >
+              ← Előző hét
+            </button>
+            <p aria-live="polite" className="text-center text-sm font-semibold text-slate-800">
+              {weekLabel}
+            </p>
+            <button
+              aria-label="Következő hét"
+              className="rounded-lg border border-slate-300 px-3 py-2 font-medium text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                setWeekStart((current) => addDays(current, 7));
+                setError("");
+              }}
+              type="button"
+            >
+              Következő hét →
+            </button>
+          </div>
           {loadingSlots ? (
             <p className="mt-6 text-sm text-slate-600">Időpontok betöltése...</p>
-          ) : slots.length ? (
-            <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {slots.map((slot) => (
-                <button
-                  className="rounded-lg border border-slate-300 px-3 py-3 font-semibold text-slate-800 hover:border-blue-600 hover:bg-blue-50 disabled:opacity-50"
-                  disabled={loading}
-                  key={slot}
-                  onClick={() => void handleSelectSlot(slot)}
-                  type="button"
+          ) : weekSlots.length ? (
+            <div className="mt-5 overflow-x-auto">
+              <div
+                aria-label="Heti időpontnaptár"
+                className="min-w-[58rem]"
+                role="grid"
+              >
+                <div
+                  className="grid grid-cols-[4rem_repeat(7,minmax(7rem,1fr))]"
+                  role="row"
                 >
-                  {formattedSlot(slot)}
-                </button>
-              ))}
+                  <span className="p-2 text-xs font-medium text-slate-500">Idő</span>
+                  {weekDays.map((day) => (
+                    <div
+                      className="border-b border-slate-200 p-2 text-center text-xs font-semibold capitalize text-slate-800"
+                      key={day}
+                      role="columnheader"
+                    >
+                      {dateFormatter.format(new Date(`${day}T12:00:00.000Z`))}
+                    </div>
+                  ))}
+                </div>
+                {timeRows.map((time) => (
+                  <div
+                    className="grid grid-cols-[4rem_repeat(7,minmax(7rem,1fr))]"
+                    key={time}
+                    role="row"
+                  >
+                    <span
+                      className="border-b border-slate-100 p-2 text-xs font-medium text-slate-500"
+                      role="rowheader"
+                    >
+                      {time}
+                    </span>
+                    {weekDays.map((day) => {
+                      const daySlots = weekSlots.filter(
+                        (slot) => slotDate(slot) === day && slotTime(slot) === time,
+                      );
+
+                      return (
+                        <div
+                          className="flex min-h-12 items-center justify-center border-b border-l border-slate-100 p-1"
+                          key={day}
+                          role="gridcell"
+                        >
+                          {daySlots.length ? (
+                            daySlots.map((slot) => {
+                              const isPast =
+                                new Date(slot.slotStart).getTime() <= Date.now();
+                              const isDisabled = loading || !slot.available || isPast;
+                              return (
+                                <button
+                                  aria-label={`${time} ${slot.available && !isPast ? "szabad" : isPast ? "lejárt" : "foglalt"}, ${dateFormatter.format(new Date(`${day}T12:00:00.000Z`))}`}
+                                  className={`w-full rounded-md border px-1 py-2 text-sm font-semibold ${
+                                    isPast
+                                      ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+                                      : slot.available
+                                        ? "border-blue-200 bg-blue-50 text-blue-800 hover:border-blue-600 hover:bg-blue-100"
+                                        : "cursor-not-allowed border-red-100 bg-red-50 line-through text-red-500"
+                                  } disabled:opacity-100`}
+                                  disabled={isDisabled}
+                                  key={slot.slotStart}
+                                  onClick={() => void handleSelectSlot(slot.slotStart)}
+                                  type="button"
+                                >
+                                  {time}
+                                </button>
+                              );
+                            })
+                          ) : (
+                            <span aria-hidden="true" className="text-slate-200">
+                              —
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
             </div>
           ) : (
             <p className="mt-5 rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
-              Erre a napra nincs szabad időpont.
+              Erre a hétre nincs megjeleníthető időpont.
             </p>
           )}
           {loading && (
@@ -490,9 +662,12 @@ export default function BookingWidget({
                 autoComplete="email"
                 className="w-full rounded-lg border border-slate-300 px-3 py-2.5"
                 maxLength={320}
-                onChange={(event) =>
-                  setCustomer({ ...customer, email: event.target.value })
-                }
+                onChange={(event) => {
+                  setCustomer({ ...customer, email: event.target.value });
+                  setEmailCodeSent(false);
+                  setEmailCode("");
+                  setEmailVerified(false);
+                }}
                 required
                 type="email"
                 value={customer.email}
@@ -511,12 +686,88 @@ export default function BookingWidget({
                 value={customer.phone}
               />
             </label>
+            <fieldset
+              className={`rounded-xl border p-4 transition ${
+                privacyError && !privacyAccepted
+                  ? "border-red-500 bg-red-50/50 ring-2 ring-red-100"
+                  : "border-slate-200 bg-slate-50/70"
+              }`}
+            >
+              <label className="flex cursor-pointer items-start gap-3 text-sm leading-6 text-slate-700">
+                <input
+                  aria-describedby={privacyError ? "privacy-error" : undefined}
+                  aria-invalid={privacyError && !privacyAccepted}
+                  checked={privacyAccepted}
+                  className="mt-1 size-4 shrink-0 accent-[var(--brand-color)]"
+                  onChange={(event) => {
+                    setPrivacyAccepted(event.target.checked);
+                    if (event.target.checked) setPrivacyError(false);
+                  }}
+                  onInvalid={() => setPrivacyError(true)}
+                  required
+                  type="checkbox"
+                />
+                <span>
+                  Elolvastam és elfogadom az{" "}
+                  <a
+                    className="font-semibold text-[var(--brand-color)] underline underline-offset-2"
+                    href="/adatvedelmi-tajekoztato.pdf"
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Adatkezelési Tájékoztatót
+                  </a>
+                  .
+                </span>
+              </label>
+              {privacyError && !privacyAccepted && (
+                <p className="mt-2 text-sm font-medium text-red-700" id="privacy-error" role="alert">
+                  A foglalás folytatásához el kell fogadnod az adatkezelési tájékoztatót.
+                </p>
+              )}
+            </fieldset>
+
+            {emailCodeSent && !emailVerified && (
+              <div className="space-y-2 rounded-xl border border-blue-100 bg-blue-50/70 p-4">
+                <p className="text-sm font-semibold text-slate-800">
+                  Küldtünk egy megerősítő kódot a(z) {customer.email} címre.
+                </p>
+                <label className="block space-y-1.5 text-sm font-medium text-slate-700">
+                  E-mail-megerősítő kód
+                  <input
+                    autoComplete="one-time-code"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-normal outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    inputMode="numeric"
+                    onChange={(event) => setEmailCode(event.target.value)}
+                    required
+                    value={emailCode}
+                  />
+                </label>
+              </div>
+            )}
+
+            {emailVerified && (
+              <p className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm font-medium text-emerald-800" role="status">
+                Az e-mail-címed megerősítve.
+              </p>
+            )}
+
             <button
-              className="w-full rounded-lg bg-blue-700 px-4 py-3 font-semibold text-white hover:bg-blue-800 disabled:opacity-60"
-              disabled={loading || timeLeft === 0}
+              className="w-full rounded-lg bg-[var(--brand-color)] px-4 py-3 font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={loading || timeLeft === 0 || (emailCodeSent && !emailVerified && !emailCode.trim())}
               type="submit"
             >
-              {loading ? "Foglalás véglegesítése..." : "Foglalás megerősítése"}
+              {loading
+                ? emailVerified
+                  ? "Foglalás véglegesítése..."
+                  : emailCodeSent
+                    ? "E-mail-cím ellenőrzése..."
+                    : "Kód küldése..."
+                : emailVerified
+                  ? "Foglalás megerősítése"
+                  : emailCodeSent
+                    ? "Kód ellenőrzése"
+                    : "E-mail-cím megerősítése"}
             </button>
           </form>
         </div>

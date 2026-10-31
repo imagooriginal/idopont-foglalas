@@ -15,13 +15,31 @@ describe("BlockoutManager", () => {
       <BlockoutManager companyId="company-1" timeZone="Europe/Budapest" blockouts={[]} />,
     );
 
-    expect(screen.getByText("Nincs rögzített jövőbeli blokkolás.")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "+ Időpont blokkolása" }));
+    expect(screen.getByText("Nincs közelgő blokkolás")).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: "Időpont blokkolása" })[0]);
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(screen.getByText("A helyi időzóna: Europe/Budapest")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Bezárás" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("offers a floating mobile quick action without changing the blockout flow", async () => {
+    const user = userEvent.setup();
+    render(
+      <BlockoutManager companyId="company-1" timeZone="Europe/Budapest" blockouts={[]} />,
+    );
+
+    const quickAction = screen.getAllByRole("button", {
+      name: "Időpont blokkolása",
+    })[1];
+    expect(quickAction).toHaveClass("fixed", "sm:hidden");
+    await user.click(quickAction);
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Blokkolás mentése" }),
+    ).toBeInTheDocument();
   });
 
   it("renders scheduled blockouts and converts local inputs to the configured timezone", () => {
@@ -41,7 +59,9 @@ describe("BlockoutManager", () => {
     );
 
     expect(screen.getByText("Ebédszünet")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "+ Időpont blokkolása" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Időpont blokkolása" })[0],
+    );
     fireEvent.change(screen.getByLabelText("Kezdés"), {
       target: { value: "2030-01-15T10:00" },
     });
@@ -62,7 +82,9 @@ describe("BlockoutManager", () => {
     render(
       <BlockoutManager companyId="company-1" timeZone="Europe/Budapest" blockouts={[]} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "+ Időpont blokkolása" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Időpont blokkolása" })[0],
+    );
     fireEvent.change(screen.getByLabelText("Kezdés"), {
       target: { value: "2026-03-29T02:30" },
     });

@@ -28,6 +28,10 @@ adatbázissal és Auth-tal, valamint Resend e-mail-küldéssel.
    [`supabase/migrations/20261029110000_fixed_grid_slots.sql`](./supabase/migrations/20261029110000_fixed_grid_slots.sql)
    majd a
    [`supabase/migrations/20261029130000_multiple_booking_services.sql`](./supabase/migrations/20261029130000_multiple_booking_services.sql)
+   majd a
+   [`supabase/migrations/20261031190000_weekly_slot_grid.sql`](./supabase/migrations/20261031190000_weekly_slot_grid.sql)
+   majd a
+   [`supabase/migrations/20261031220000_saas_management_and_booking_consent.sql`](./supabase/migrations/20261031220000_saas_management_and_booking_consent.sql)
    migrációt. Ne cseréld le az eredeti SQL-t a migrációkra. Előtte készíts
    adatbázis-mentést, és oldd fel az első migráció által jelzett esetleges
    átfedő aktív foglalásokat.
@@ -44,6 +48,12 @@ adatbázissal és Auth-tal, valamint Resend e-mail-küldéssel.
    `select public.set_company_status('<company-uuid>', 'active');`.
    A dashboardos szolgáltatói felhasználónak a cég `owner_id` mezőjében
    szereplő Auth-felhasználónak kell lennie.
+
+   A védett SaaS áttekintő a `/superadmin` útvonalon érhető el, és csak a
+   `platform_admins` táblában szereplő fiókkal használható. A tenant
+   létrehozásakor a megadott kapcsolattartó e-mail-címére meghívó megy. A
+   `free`, `starter` és `pro` értékek adminisztrátori csomagcímkék; fizetési
+   szolgáltató vagy automatikus előfizetés-kezelés nincs bekötve.
 
 5. Töltsd fel a `company_business_hours` táblát. A `weekday` értéke
    `0 = vasárnap` ... `6 = szombat`; a napi nyitvatartás időzónája a
@@ -94,6 +104,14 @@ fájl pedig a `coverage/lcov.info` helyre kerül. A CI ezt a parancsot futtatja,
   megjelennek.
 - Sikeres foglaláskor e-mail megy az ügyfélnek és a cég tulajdonosának; az
   üzenet Google Naptár-linket és ICS-naptárfájlt tartalmaz.
+- A foglalás előtt Supabase Auth egyszer használatos e-mail-kódot kér. A
+  foglalás csak az aktív, azonos e-mail-című, megerősített Auth-munkamenetből
+  véglegesíthető. Az e-mail-megerősítés és az adatkezelési tájékoztató
+  elfogadása egy adatbázis-műveletben kerül a foglaláshoz. Ehhez engedélyezd
+  az e-mailes OTP-t a Supabase Auth beállításaiban, és állíts be OTP-t
+  tartalmazó e-mail-sablont.
+- A foglalóoldal tenantonkénti főszínt és `display_order` szerinti
+  szolgáltatássorrendet használ.
 - A foglalás adatbázisban való véglegesítése akkor is megmarad, ha az e-mail
   konfigurációja hiányzik vagy a kézbesítés sikertelen; ilyen esetben a
   foglaló figyelmeztetést jelenít meg.
