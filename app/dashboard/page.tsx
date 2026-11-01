@@ -3,6 +3,8 @@ import { redirect } from "next/navigation";
 import { connection } from "next/server";
 import { signOutAction } from "./actions";
 import BlockoutManager from "./BlockoutManager";
+import BusinessHoursManager from "./BusinessHoursManager";
+import TenantServiceManager from "./TenantServiceManager";
 import { getSupabasePublicConfig } from "@/lib/supabase/config";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -74,14 +76,20 @@ function DashboardIcon({
 function DashboardShell({
   email,
   children,
+  canManageServices = false,
 }: {
   email: string;
   children: ReactNode;
+  canManageServices?: boolean;
 }) {
   const navigation = [
     { href: "#overview", label: "Áttekintés", icon: "dashboard" as const },
     { href: "#bookings", label: "Foglalások", icon: "calendar" as const },
-    { href: "#blockouts", label: "Blokkolások", icon: "clock" as const },
+    { href: "#settings", label: "Nyitvatartás", icon: "clock" as const },
+    { href: "#blockouts", label: "Zárvatartás", icon: "wrench" as const },
+    ...(canManageServices
+      ? [{ href: "#services", label: "Szolgáltatások", icon: "wrench" as const }]
+      : []),
   ];
 
   return (
@@ -165,11 +173,11 @@ function DashboardShell({
 
       <nav
         aria-label="Mobil navigáció"
-        className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-3 border-t border-slate-200 bg-white/95 px-2 pb-[env(safe-area-inset-bottom)] pt-2 shadow-[0_-8px_24px_rgba(15,23,42,0.06)] backdrop-blur md:hidden"
+        className="fixed inset-x-0 bottom-0 z-40 flex justify-around border-t border-slate-200 bg-white/95 px-1 pb-[env(safe-area-inset-bottom)] pt-2 shadow-[0_-8px_24px_rgba(15,23,42,0.06)] backdrop-blur md:hidden"
       >
         {navigation.map((item, index) => (
           <a
-            className={`flex min-h-14 flex-col items-center justify-center gap-1 rounded-xl text-[11px] font-semibold ${
+            className={`flex min-h-14 min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-xl text-[10px] font-semibold ${
               index === 0 ? "text-blue-700" : "text-slate-500"
             }`}
             href={item.href}
@@ -210,6 +218,34 @@ function addDays(date: string, days: number) {
   const value = new Date(`${date}T00:00:00.000Z`);
   value.setUTCDate(value.getUTCDate() + days);
   return value.toISOString().slice(0, 10);
+}
+
+function getBookingExtraDetails(booking: {
+  custom_fields: unknown;
+  jarmu_marka: string | null;
+  jarmu_modell: string | null;
+  jarmu_rendszam: string | null;
+}, fieldLabels: Map<string, string>) {
+  if (
+    booking.custom_fields &&
+    typeof booking.custom_fields === "object" &&
+    !Array.isArray(booking.custom_fields)
+  ) {
+    const values = Object.entries(booking.custom_fields).filter(
+      (entry): entry is [string, string] =>
+        typeof entry[1] === "string" && entry[1].trim().length > 0,
+    );
+    if (values.length) {
+      return values.map(
+        ([key, value]) => `${fieldLabels.get(key) ?? key}: ${value}`,
+      );
+    }
+  }
+
+  return [
+    [booking.jarmu_marka, booking.jarmu_modell].filter(Boolean).join(" "),
+    booking.jarmu_rendszam,
+  ].filter((value): value is string => Boolean(value));
 }
 
 function MetricCard({
@@ -275,7 +311,9 @@ export default async function DashboardPage({
 
   const { data: companies, error: companiesError } = await supabase
     .from("companies")
-    .select("id, nev, slug, status, time_zone")
+    .select(
+      "id, nev, slug, status, time_zone, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, nyitvatartas_kezdet, nyitvatartas_vege",
+    )
     .eq("owner_id", userData.user.id);
 
   if (companiesError) throw new Error(`Cégek betöltése nem sikerült: ${companiesError.message}`);
@@ -312,12 +350,31 @@ export default async function DashboardPage({
   const { company: requestedCompanyId } = await searchParams;
   const company =
     companies.find((item) => item.id === requestedCompanyId) ?? companies[0];
+  const customFieldLabels = new Map<string, string>(
+    (Array.isArray(company.custom_booking_fields)
+      ? company.custom_booking_fields
+      : []
+    )
+      .filter(
+        (field: unknown): field is { key: string; label: string } =>
+          Boolean(field) &&
+          typeof field === "object" &&
+          typeof (field as { key?: unknown }).key === "string" &&
+          typeof (field as { label?: unknown }).label === "string",
+      )
+      .map((field: { key: string; label: string }) => [field.key, field.label]),
+  );
   const now = new Date().toISOString();
-  const [bookingsResult, blockoutsResult, servicesResult] = await Promise.all([
+  const [
+    bookingsResult,
+    blockoutsResult,
+    servicesResult,
+    businessHoursResult,
+  ] = await Promise.all([
     supabase
       .from("bookings")
       .select(
-        "id, service_id, ugyfel_nev, ugyfel_email, ugyfel_telefon, jarmu_marka, jarmu_modell, jarmu_rendszam, kezdes_ideje, vege_ideje",
+        "id, service_id, ugyfel_nev, ugyfel_email, ugyfel_telefon, jarmu_marka, jarmu_modell, jarmu_rendszam, custom_fields, kezdes_ideje, vege_ideje",
       )
       .eq("cég_id", company.id)
       .eq("status", "confirmed")
@@ -333,8 +390,13 @@ export default async function DashboardPage({
       .limit(50),
     supabase
       .from("services")
-      .select("id, nev")
+      .select("id, nev, idotartam_percben, ar, display_order, leiras, is_active")
       .eq("cég_id", company.id),
+    supabase
+      .from("company_business_hours")
+      .select("weekday, opens_at, closes_at")
+      .eq("company_id", company.id)
+      .order("weekday", { ascending: true }),
   ]);
 
   if (bookingsResult.error) {
@@ -345,6 +407,9 @@ export default async function DashboardPage({
   }
   if (servicesResult.error) {
     throw new Error(`Szolgáltatások betöltése nem sikerült: ${servicesResult.error.message}`);
+  }
+  if (businessHoursResult.error) {
+    throw new Error(`Nyitvatartás betöltése nem sikerült: ${businessHoursResult.error.message}`);
   }
   const bookingIds = (bookingsResult.data ?? []).map((booking) => booking.id);
   const bookingServicesResult = bookingIds.length
@@ -404,7 +469,12 @@ export default async function DashboardPage({
         : "bg-rose-500";
 
   return (
-    <DashboardShell email={userData.user.email ?? ""}>
+    <DashboardShell
+      canManageServices={
+        company.can_edit_prices || company.can_manage_services_advanced
+      }
+      email={userData.user.email ?? ""}
+    >
       <div className="space-y-8">
         <section
           className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between"
@@ -529,7 +599,7 @@ export default async function DashboardPage({
                         <th className="px-6 py-3.5 font-semibold">Időpont</th>
                         <th className="px-6 py-3.5 font-semibold">Ügyfél</th>
                         <th className="px-6 py-3.5 font-semibold">Szolgáltatás</th>
-                        <th className="px-6 py-3.5 font-semibold">Jármű</th>
+                        <th className="px-6 py-3.5 font-semibold">Foglalási adatok</th>
                         <th className="px-6 py-3.5 font-semibold">Állapot</th>
                       </tr>
                     </thead>
@@ -565,14 +635,11 @@ export default async function DashboardPage({
                               "Szolgáltatás"}
                           </td>
                           <td className="px-6 py-4 text-slate-700">
-                            <span className="block">
-                              {booking.jarmu_marka} {booking.jarmu_modell}
-                            </span>
-                            {booking.jarmu_rendszam && (
-                              <span className="mt-1 block text-xs text-slate-500">
-                                {booking.jarmu_rendszam}
-                              </span>
-                            )}
+                            {getBookingExtraDetails(booking, customFieldLabels).length
+                              ? getBookingExtraDetails(booking, customFieldLabels).map((value) => (
+                                  <span className="block" key={value}>{value}</span>
+                                ))
+                              : "—"}
                           </td>
                           <td className="px-6 py-4">
                             <BookingStatusBadge />
@@ -613,13 +680,10 @@ export default async function DashboardPage({
                         </div>
                         <div>
                           <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">
-                            Jármű
+                            Foglalási adatok
                           </dt>
                           <dd className="mt-1 text-slate-700">
-                            {booking.jarmu_marka} {booking.jarmu_modell}
-                            {booking.jarmu_rendszam
-                              ? ` · ${booking.jarmu_rendszam}`
-                              : ""}
+                            {getBookingExtraDetails(booking, customFieldLabels).join(" · ") || "—"}
                           </dd>
                         </div>
                         <div>
@@ -649,6 +713,20 @@ export default async function DashboardPage({
             timeZone={timeZone}
           />
         </div>
+        <BusinessHoursManager
+          companyId={company.id}
+          hours={businessHoursResult.data ?? []}
+          key={company.id}
+        />
+        {(company.can_edit_prices || company.can_manage_services_advanced) && (
+          <TenantServiceManager
+            companyId={company.id}
+            canEditPrices={company.can_edit_prices}
+            canManageServicesAdvanced={company.can_manage_services_advanced}
+            services={servicesResult.data ?? []}
+            key={`${company.id}:${servicesResult.data?.map((service) => `${service.id}-${service.nev}-${service.idotartam_percben}-${service.ar}-${service.leiras}-${service.is_active}`).join(",")}`}
+          />
+        )}
       </div>
     </DashboardShell>
   );

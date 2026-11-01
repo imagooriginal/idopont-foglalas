@@ -117,7 +117,28 @@ describe("available slots route", () => {
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({
       error:
-        "A heti naptár adatbázis-frissítése hiányzik. Futtasd le a 20261031190000_weekly_slot_grid.sql migrációt a Supabase projektben.",
+        "A heti naptár adatbázis-frissítése hiányzik. Futtasd le sorrendben a Supabase-migrációkat, köztük a 20261102230000_booking_rpc_and_public_hours_fallback.sql fájlt.",
+    });
+  });
+
+  it("explains when a company or selected service is inactive or mismatched", async () => {
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: {
+        code: "P0001",
+        message: "Company or selected active services are unavailable.",
+      },
+    });
+
+    const response = await GET(
+      request(`serviceIds=${serviceId}&weekStart=2030-01-14`),
+      { params: Promise.resolve({ companySlug: "workshop" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error:
+        "A szolgáltató nem aktív, vagy a kiválasztott szolgáltatás nem érhető el ennél a szolgáltatónál.",
     });
   });
 });

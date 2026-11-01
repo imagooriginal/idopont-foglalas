@@ -56,9 +56,21 @@ export async function GET(
       return Response.json(
         {
           error:
-            "A heti naptár adatbázis-frissítése hiányzik. Futtasd le a 20261031190000_weekly_slot_grid.sql migrációt a Supabase projektben.",
+            "A heti naptár adatbázis-frissítése hiányzik. Futtasd le sorrendben a Supabase-migrációkat, köztük a 20261102230000_booking_rpc_and_public_hours_fallback.sql fájlt.",
         },
         { status: 503 },
+      );
+    }
+    if (
+      error.code === "P0001" &&
+      error.message === "Company or selected active services are unavailable."
+    ) {
+      return Response.json(
+        {
+          error:
+            "A szolgáltató nem aktív, vagy a kiválasztott szolgáltatás nem érhető el ennél a szolgáltatónál.",
+        },
+        { status: 409 },
       );
     }
     return Response.json({ error: "Az elérhetőségek nem tölthetők be." }, { status: 500 });

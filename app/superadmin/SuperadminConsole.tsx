@@ -24,18 +24,31 @@ import {
   createServiceAction,
   createTenantAction,
   reorderServicesAction,
+  setPlatformServiceActiveAction,
   updateTenantPlanAction,
+  updateTenantStatusAction,
+  updatePlatformServiceAction,
+  updateTenantSettingsAction,
   type SuperadminActionState,
 } from "../dashboard/actions";
 
 export interface SuperadminCompany {
   id: string;
+  status: "pending" | "active" | "suspended";
   nev: string;
   slug: string;
   owner_id: string;
   plan: "free" | "starter" | "pro";
   primary_color: string;
   subscription_started_at: string;
+  nyitvatartas_kezdet: string;
+  nyitvatartas_vege: string;
+  can_manage_services: boolean;
+  can_edit_prices: boolean;
+  can_manage_services_advanced: boolean;
+  custom_booking_fields: unknown;
+  time_zone: string;
+  slot_interval_minutes: number;
 }
 
 export interface SuperadminService {
@@ -44,6 +57,8 @@ export interface SuperadminService {
   idotartam_percben: number;
   ar: number | string;
   display_order: number;
+  leiras: string;
+  is_active: boolean;
 }
 
 const initialState: SuperadminActionState = {};
@@ -55,6 +70,19 @@ function slugify(value: string) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+}
+
+function bookingFieldsToLines(value: unknown) {
+  if (!Array.isArray(value)) return "";
+  return value
+    .filter(
+      (field): field is { label: string; required?: boolean } =>
+        Boolean(field) &&
+        typeof field === "object" &&
+        typeof (field as { label?: unknown }).label === "string",
+    )
+    .map((field) => `${field.required ? "*" : ""}${field.label}`)
+    .join("\n");
 }
 
 function Metric({
@@ -182,6 +210,98 @@ function TenantCreateForm() {
             </select>
           </label>
         </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Nyitás
+            <input
+              className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+              defaultValue="09:00"
+              name="openingTime"
+              required
+              type="time"
+            />
+          </label>
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Zárás
+            <input
+              className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+              defaultValue="17:00"
+              name="closingTime"
+              required
+              type="time"
+            />
+          </label>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Időzóna
+            <input
+              className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal"
+              defaultValue="Europe/Budapest"
+              maxLength={100}
+              name="timeZone"
+              required
+            />
+          </label>
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Időpont-rács (perc)
+            <input
+              className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal"
+              defaultValue={15}
+              max={240}
+              min={5}
+              name="slotIntervalMinutes"
+              required
+              type="number"
+            />
+          </label>
+        </div>
+        <p className="text-xs leading-5 text-slate-500">
+          Az új szolgáltató hétfőtől péntekig lesz nyitva. A heti rend később
+          naponta módosítható a szolgáltatói dashboardon.
+        </p>
+        <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3 text-sm text-slate-700">
+          <input
+            className="mt-0.5 size-4 accent-blue-700"
+            name="canEditPrices"
+            type="checkbox"
+          />
+          <span>
+            <span className="block font-semibold">
+              Ár és leírás módosításának engedélyezése
+            </span>
+            <span className="mt-0.5 block text-xs text-slate-500">
+              A szolgáltató csak meglévő szolgáltatások árát és leírását módosíthatja.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3 text-sm text-slate-700">
+          <input
+            className="mt-0.5 size-4 accent-blue-700"
+            name="canManageServicesAdvanced"
+            type="checkbox"
+          />
+          <span>
+            <span className="block font-semibold">
+              Haladó szolgáltatáskezelés engedélyezése
+            </span>
+            <span className="mt-0.5 block text-xs text-slate-500">
+              Új szolgáltatást adhat hozzá, módosíthatja az időtartamot és elrejtheti a szolgáltatásokat.
+            </span>
+          </span>
+        </label>
+        <label className="block space-y-1.5 text-sm font-medium text-slate-700">
+          Extra foglalási kérdések
+          <textarea
+            className="min-h-24 w-full rounded-xl border border-slate-200 px-3 py-2.5 font-normal"
+            name="customBookingFields"
+            placeholder={"Rendszám\n*Márka\nModell"}
+            rows={3}
+          />
+          <span className="block text-xs font-normal text-slate-500">
+            Egy mező soronként; a *-gal kezdődő mező kötelező. Üresen hagyva nem kérünk extra adatot.
+          </span>
+        </label>
         <ActionMessage state={state} />
         <button
           className="w-full rounded-xl bg-blue-700 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800 disabled:cursor-wait disabled:opacity-60"
@@ -192,6 +312,180 @@ function TenantCreateForm() {
         </button>
       </form>
     </section>
+  );
+}
+
+function TenantSettingsForm({ company }: { company: SuperadminCompany }) {
+  const [state, action, pending] = useActionState(
+    updateTenantSettingsAction,
+    initialState,
+  );
+
+  return (
+    <form
+      action={action}
+      className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"
+    >
+      <input name="companyId" type="hidden" value={company.id} />
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">
+          Szolgáltató beállításai
+        </p>
+        <h3 className="mt-1 text-lg font-bold text-slate-950">
+          {company.nev} szerkesztése
+        </h3>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="space-y-1.5 text-sm font-medium text-slate-700">
+          Cég neve
+          <input
+            className="w-full rounded-xl border border-slate-200 px-3 py-2.5 font-normal"
+            defaultValue={company.nev}
+            maxLength={100}
+            name="name"
+            required
+          />
+        </label>
+        <label className="space-y-1.5 text-sm font-medium text-slate-700">
+          Foglalóoldal címe
+          <span className="flex items-center rounded-xl border border-slate-200 px-3 text-sm font-normal text-slate-500">
+            /
+            <input
+              className="min-w-0 flex-1 px-2 py-2.5 text-slate-800 outline-none"
+              defaultValue={company.slug}
+              name="slug"
+              required
+            />
+          </span>
+        </label>
+        <label className="space-y-1.5 text-sm font-medium text-slate-700">
+          Fő szín
+          <span className="flex h-11 items-center gap-3 rounded-xl border border-slate-200 px-3">
+            <input
+              aria-label={`${company.nev} fő színe`}
+              className="size-7 cursor-pointer rounded-md border-0 bg-transparent p-0"
+              defaultValue={company.primary_color}
+              name="primaryColor"
+              type="color"
+            />
+            <span className="text-xs font-normal text-slate-500">
+              Foglalóoldal arculati színe
+            </span>
+          </span>
+        </label>
+        <label className="space-y-1.5 text-sm font-medium text-slate-700">
+          Csomag
+          <select
+            className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 font-normal"
+            defaultValue={company.plan}
+            name="plan"
+          >
+            <option value="free">Free</option>
+            <option value="starter">Starter</option>
+            <option value="pro">Pro</option>
+          </select>
+        </label>
+        <label className="space-y-1.5 text-sm font-medium text-slate-700">
+          Nyitás
+          <input
+            className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal"
+            defaultValue={company.nyitvatartas_kezdet.slice(0, 5)}
+            name="openingTime"
+            required
+            type="time"
+          />
+        </label>
+        <label className="space-y-1.5 text-sm font-medium text-slate-700">
+          Zárás
+          <input
+            className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal"
+            defaultValue={company.nyitvatartas_vege.slice(0, 5)}
+            name="closingTime"
+            required
+            type="time"
+          />
+        </label>
+        <label className="space-y-1.5 text-sm font-medium text-slate-700">
+          Időzóna
+          <input
+            className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal"
+            defaultValue={company.time_zone}
+            maxLength={100}
+            name="timeZone"
+            required
+          />
+        </label>
+        <label className="space-y-1.5 text-sm font-medium text-slate-700">
+          Időpont-rács (perc)
+          <input
+            className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal"
+            defaultValue={company.slot_interval_minutes}
+            max={240}
+            min={5}
+            name="slotIntervalMinutes"
+            required
+            type="number"
+          />
+        </label>
+      </div>
+      <p className="text-xs leading-5 text-slate-500">
+        A megadott időt hétfőtől péntekig állítjuk be; a hétvége zárva lesz.
+        A részletes heti rendet a szolgáltató később naponta módosíthatja.
+      </p>
+      <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3 text-sm text-slate-700">
+        <input
+          className="mt-0.5 size-4 accent-blue-700"
+          defaultChecked={company.can_edit_prices}
+          name="canEditPrices"
+          type="checkbox"
+        />
+        <span>
+          <span className="block font-semibold">
+            Ár és leírás módosításának engedélyezése
+          </span>
+          <span className="mt-0.5 block text-xs text-slate-500">
+            A szolgáltató meglévő szolgáltatások árát és leírását módosíthatja.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3 text-sm text-slate-700">
+        <input
+          className="mt-0.5 size-4 accent-blue-700"
+          defaultChecked={company.can_manage_services_advanced}
+          name="canManageServicesAdvanced"
+          type="checkbox"
+        />
+        <span>
+          <span className="block font-semibold">
+            Haladó szolgáltatáskezelés engedélyezése
+          </span>
+          <span className="mt-0.5 block text-xs text-slate-500">
+            Új szolgáltatást adhat hozzá, módosíthatja az időtartamot és elrejtheti a szolgáltatásokat.
+          </span>
+        </span>
+      </label>
+      <label className="block space-y-1.5 text-sm font-medium text-slate-700">
+        Extra foglalási kérdések
+        <textarea
+          className="min-h-24 w-full rounded-xl border border-slate-200 px-3 py-2.5 font-normal"
+          defaultValue={bookingFieldsToLines(company.custom_booking_fields)}
+          name="customBookingFields"
+          placeholder={"Rendszám\n*Márka\nModell"}
+          rows={3}
+        />
+        <span className="block text-xs font-normal text-slate-500">
+          Egy mező soronként; a *-gal kezdődő mező kötelező.
+        </span>
+      </label>
+      <ActionMessage state={state} />
+      <button
+        className="w-full rounded-xl bg-blue-700 px-4 py-3 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-60"
+        disabled={pending}
+        type="submit"
+      >
+        {pending ? "Mentés..." : "Szolgáltató adatainak mentése"}
+      </button>
+    </form>
   );
 }
 
@@ -225,9 +519,44 @@ function PlanForm({ company }: { company: SuperadminCompany }) {
   );
 }
 
+function TenantStatusForm({ company }: { company: SuperadminCompany }) {
+  const [state, action, pending] = useActionState(
+    updateTenantStatusAction,
+    initialState,
+  );
+  return (
+    <form action={action} className="space-y-2">
+      <input name="companyId" type="hidden" value={company.id} />
+      <label className="sr-only" htmlFor={`status-${company.id}`}>
+        {company.nev} státusza
+      </label>
+      <select
+        className="h-10 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700"
+        defaultValue={company.status}
+        id={`status-${company.id}`}
+        name="status"
+      >
+        <option value="pending">Jóváhagyásra vár</option>
+        <option value="active">Aktív</option>
+        <option value="suspended">Felfüggesztve</option>
+      </select>
+      <button
+        className="w-full rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-60"
+        disabled={pending}
+        type="submit"
+      >
+        {pending ? "Mentés..." : "Státusz mentése"}
+      </button>
+      <ActionMessage state={state} />
+    </form>
+  );
+}
+
 function SortableService({
+  companyId,
   service,
 }: {
+  companyId: string;
   service: SuperadminService;
 }) {
   const {
@@ -238,45 +567,135 @@ function SortableService({
     transition,
     isDragging,
   } = useSortable({ id: service.id });
+  const [state, action, pending] = useActionState(
+    updatePlatformServiceAction,
+    initialState,
+  );
+  const [toggleState, toggleAction, toggling] = useActionState(
+    setPlatformServiceActiveAction.bind(
+      null,
+      companyId,
+      service.id,
+      !service.is_active,
+    ),
+    initialState,
+  );
 
   return (
     <li
-      className={`flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm ${
+      className={`rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm ${
         isDragging ? "z-10 opacity-70 shadow-lg" : ""
       }`}
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition }}
     >
-      <button
-        aria-label={`${service.nev} áthúzása`}
-        className="flex size-9 shrink-0 cursor-grab touch-none items-center justify-center rounded-lg bg-slate-50 text-slate-500 active:cursor-grabbing"
-        type="button"
-        {...attributes}
-        {...listeners}
-      >
-        <svg
-          aria-hidden="true"
-          className="size-5"
-          fill="currentColor"
-          viewBox="0 0 20 20"
+      <div className="flex items-center gap-3">
+        <button
+          aria-label={`${service.nev} áthúzása`}
+          className="flex size-9 shrink-0 cursor-grab touch-none items-center justify-center rounded-lg bg-slate-50 text-slate-500 active:cursor-grabbing"
+          type="button"
+          {...attributes}
+          {...listeners}
         >
-          <circle cx="7" cy="5" r="1.5" />
-          <circle cx="13" cy="5" r="1.5" />
-          <circle cx="7" cy="10" r="1.5" />
-          <circle cx="13" cy="10" r="1.5" />
-          <circle cx="7" cy="15" r="1.5" />
-          <circle cx="13" cy="15" r="1.5" />
-        </svg>
-      </button>
-      <div className="min-w-0 flex-1">
-        <p className="truncate font-semibold text-slate-900">{service.nev}</p>
-        <p className="mt-1 text-xs text-slate-500">
-          {service.idotartam_percben} perc · {Number(service.ar).toLocaleString("hu-HU")} Ft
-        </p>
+          <svg
+            aria-hidden="true"
+            className="size-5"
+            fill="currentColor"
+            viewBox="0 0 20 20"
+          >
+            <circle cx="7" cy="5" r="1.5" />
+            <circle cx="13" cy="5" r="1.5" />
+            <circle cx="7" cy="10" r="1.5" />
+            <circle cx="13" cy="10" r="1.5" />
+            <circle cx="7" cy="15" r="1.5" />
+            <circle cx="13" cy="15" r="1.5" />
+          </svg>
+        </button>
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-semibold text-slate-900">{service.nev}</p>
+          <p className="mt-1 text-xs text-slate-500">
+            {service.idotartam_percben} perc · {Number(service.ar).toLocaleString("hu-HU")} Ft
+          </p>
+        </div>
+        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+          service.is_active
+            ? "bg-emerald-50 text-emerald-700"
+            : "bg-slate-100 text-slate-500"
+        }`}>
+          {service.is_active ? "Aktív" : "Rejtett"} · {service.display_order + 1}.
+        </span>
       </div>
-      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
-        {service.display_order + 1}.
-      </span>
+      <form action={action} className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <input name="companyId" type="hidden" value={companyId} />
+        <input name="serviceId" type="hidden" value={service.id} />
+        <label className="space-y-1 text-xs font-semibold text-slate-600">
+          Név
+          <input
+            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900"
+            defaultValue={service.nev}
+            maxLength={100}
+            name="name"
+            required
+          />
+        </label>
+        <label className="space-y-1 text-xs font-semibold text-slate-600">
+          Időtartam (perc)
+          <input
+            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900"
+            defaultValue={service.idotartam_percben}
+            max={1440}
+            min={1}
+            name="duration"
+            required
+            type="number"
+          />
+        </label>
+        <label className="space-y-1 text-xs font-semibold text-slate-600">
+          Ár (Ft)
+          <input
+            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900"
+            defaultValue={Number(service.ar)}
+            max={1_000_000_000}
+            min={0}
+            name="price"
+            required
+            type="number"
+          />
+        </label>
+        <label className="space-y-1 text-xs font-semibold text-slate-600">
+          Leírás
+          <input
+            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900"
+            defaultValue={service.leiras}
+            maxLength={1000}
+            name="description"
+          />
+        </label>
+        <div className="flex flex-wrap items-center gap-2 sm:col-span-2 xl:col-span-4">
+          <button
+            className="rounded-lg border border-blue-200 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+            disabled={pending}
+            type="submit"
+          >
+            {pending ? "Mentés..." : "Módosítás"}
+          </button>
+          <ActionMessage state={state} />
+        </div>
+      </form>
+      <form action={toggleAction} className="mt-2">
+        <button
+          className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          disabled={toggling}
+          type="submit"
+        >
+          {toggling
+            ? "Mentés..."
+            : service.is_active
+              ? "Elrejtés"
+              : "Újraaktiválás"}
+        </button>
+        <ActionMessage state={toggleState} />
+      </form>
     </li>
   );
 }
@@ -377,8 +796,17 @@ function ServiceManager({
             type="number"
           />
         </label>
+        <label className="space-y-1 text-xs font-semibold text-slate-600 sm:col-span-2 xl:col-span-4">
+          Leírás
+          <textarea
+            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-normal outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            maxLength={1000}
+            name="description"
+            rows={2}
+          />
+        </label>
         <button
-          className="self-end rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-800 disabled:opacity-60"
+          className="self-end rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-800 disabled:opacity-60 sm:col-span-2 xl:col-span-4"
           disabled={creating}
           type="submit"
         >
@@ -412,7 +840,11 @@ function ServiceManager({
               className={`mt-4 space-y-2 ${pending ? "pointer-events-none opacity-60" : ""}`}
             >
               {services.map((service) => (
-                <SortableService key={service.id} service={service} />
+                <SortableService
+                  companyId={companyId}
+                  key={service.id}
+                  service={service}
+                />
               ))}
             </ul>
           </SortableContext>
@@ -447,7 +879,7 @@ function TenantTable({
         <div className="divide-y divide-slate-100">
           {companies.map((company) => (
             <article
-              className="grid gap-3 px-5 py-4 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-center sm:px-6"
+              className="grid gap-3 px-5 py-4 sm:grid-cols-[minmax(0,1.3fr)_minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1fr)] sm:items-center sm:px-6"
               key={company.id}
             >
               <div className="flex min-w-0 items-center gap-3">
@@ -476,6 +908,15 @@ function TenantTable({
                   Csomag kezelése
                 </p>
                 <PlanForm company={company} key={`${company.id}:${company.plan}`} />
+              </div>
+              <div>
+                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400 sm:hidden">
+                  Státusz
+                </p>
+                <TenantStatusForm
+                  company={company}
+                  key={`${company.id}:${company.status}`}
+                />
               </div>
             </article>
           ))}
@@ -611,9 +1052,15 @@ export default function SuperadminConsole({
                 </div>
                 <ServiceManager
                   companyId={selectedCompany.id}
-                  key={`${selectedCompany.id}:${services.map((service) => `${service.id}-${service.display_order}`).join(",")}`}
+                  key={`${selectedCompany.id}:${services.map((service) => `${service.id}-${service.display_order}-${service.nev}-${service.idotartam_percben}-${service.ar}-${service.leiras}-${service.is_active}`).join(",")}`}
                   services={services}
                 />
+                <div className="mt-5">
+                  <TenantSettingsForm
+                    company={selectedCompany}
+                    key={`settings:${selectedCompany.id}:${selectedCompany.can_edit_prices}:${selectedCompany.can_manage_services_advanced}:${bookingFieldsToLines(selectedCompany.custom_booking_fields)}`}
+                  />
+                </div>
               </div>
             ) : (
               <div className="mt-5 rounded-2xl border border-dashed border-slate-200 px-5 py-12 text-center">

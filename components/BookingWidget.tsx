@@ -8,6 +8,14 @@ interface Service {
   nev: string;
   idotartam_percben: number;
   ar: number | string;
+  leiras?: string;
+}
+
+interface CustomBookingField {
+  key: string;
+  label: string;
+  type: "text";
+  required: boolean;
 }
 
 interface BookingWidgetProps {
@@ -19,6 +27,7 @@ interface BookingWidgetProps {
   initialDay: string;
   primaryColor: string;
   services: Service[];
+  customBookingFields: CustomBookingField[];
 }
 
 interface LockResponse {
@@ -49,6 +58,43 @@ function getMonday(date: string) {
   return addDays(date, day === 0 ? -6 : 1 - day);
 }
 
+function getMonthStart(date: string) {
+  return `${date.slice(0, 7)}-01`;
+}
+
+function shiftMonth(monthStart: string, offset: number) {
+  const date = new Date(`${monthStart}T00:00:00.000Z`);
+  date.setUTCMonth(date.getUTCMonth() + offset);
+  return date.toISOString().slice(0, 7) + "-01";
+}
+
+function getCalendarDays(monthStart: string) {
+  const firstWeekday = new Date(`${monthStart}T00:00:00.000Z`).getUTCDay();
+  const leadingDays = (firstWeekday + 6) % 7;
+  const nextMonthStart = shiftMonth(monthStart, 1);
+  const daysInMonth = Math.round(
+    (new Date(`${nextMonthStart}T00:00:00.000Z`).getTime() -
+      new Date(`${monthStart}T00:00:00.000Z`).getTime()) /
+      86_400_000,
+  );
+  const cellCount = Math.ceil((leadingDays + daysInMonth) / 7) * 7;
+  const calendarStart = addDays(monthStart, -leadingDays);
+  return Array.from({ length: cellCount }, (_, index) =>
+    addDays(calendarStart, index),
+  );
+}
+
+function getMonthWeekStarts(monthStart: string) {
+  const firstWeek = getMonday(monthStart);
+  const lastDay = addDays(shiftMonth(monthStart, 1), -1);
+  const lastWeek = getMonday(lastDay);
+  const weeks: string[] = [];
+  for (let week = firstWeek; week <= lastWeek; week = addDays(week, 7)) {
+    weeks.push(week);
+  }
+  return weeks;
+}
+
 export default function BookingWidget({
   companyId,
   companyName,
@@ -58,19 +104,17 @@ export default function BookingWidget({
   initialDay,
   primaryColor,
   services,
+  customBookingFields,
 }: BookingWidgetProps) {
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [selectedServices, setSelectedServices] = useState<Service[]>([]);
-  const [weekStart, setWeekStart] = useState(() => getMonday(initialDay));
+  const [monthStart, setMonthStart] = useState(() => getMonthStart(initialDay));
+  const [selectedDay, setSelectedDay] = useState(initialDay);
   const [slotResult, setSlotResult] = useState<{
     key: string;
     slots: WeekSlot[];
   } | null>(null);
-  const [vehicle, setVehicle] = useState({
-    make: "",
-    model: "",
-    registration: "",
-  });
+  const [bookingFields, setBookingFields] = useState<Record<string, string>>({});
   const [customer, setCustomer] = useState({
     name: "",
     email: "",
@@ -97,16 +141,15 @@ export default function BookingWidget({
     0,
   );
   const slotRequestKey =
-    selectedServices.length && weekStart
-      ? `${companySlug}:${selectedServiceIds.join(",")}:${weekStart}`
+    selectedServices.length && monthStart
+      ? `${companySlug}:${selectedServiceIds.join(",")}:${monthStart}`
       : "";
   const weekSlots =
     slotResult?.key === slotRequestKey ? slotResult.slots : [];
   const loadingSlots =
     step === 2 && Boolean(slotRequestKey) && slotResult?.key !== slotRequestKey;
-  const weekDays = Array.from({ length: 7 }, (_, index) =>
-    addDays(weekStart, index),
-  );
+  const calendarDays = getCalendarDays(monthStart);
+  const monthWeekStartsKey = getMonthWeekStarts(monthStart).join(",");
   const dateFormatter = new Intl.DateTimeFormat("hu-HU", {
     weekday: "long",
     month: "short",
@@ -134,22 +177,35 @@ export default function BookingWidget({
   };
   const slotTime = (slot: WeekSlot) =>
     slotTimeFormatter.format(new Date(slot.slotStart));
-  const timeRows = [...new Set(weekSlots.map(slotTime))].sort();
-  const weekLabel = `${dateFormatter.format(new Date(`${weekStart}T12:00:00.000Z`))} – ${dateFormatter.format(new Date(`${weekDays[6]}T12:00:00.000Z`))}`;
+  const selectedDaySlots = weekSlots.filter(
+    (slot) => slotDate(slot) === selectedDay,
+  );
+  const availableSlotsForDay = selectedDaySlots.filter((slot) => slot.available);
+  const morningSlots = availableSlotsForDay.filter((slot) => slotTime(slot) < "12:00");
+  const afternoonSlots = availableSlotsForDay.filter((slot) => slotTime(slot) >= "12:00");
+  const requiredBookingFieldsComplete = customBookingFields.every(
+    (field) => !field.required || Boolean(bookingFields[field.key]?.trim()),
+  );
+  const monthLabel = new Intl.DateTimeFormat("hu-HU", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(`${monthStart}T12:00:00.000Z`));
 
   useEffect(() => {
-    if (step !== 2 || !selectedServices.length || !weekStart) return;
+    if (step !== 2 || !selectedServices.length || !monthStart) return;
 
     const controller = new AbortController();
     const serviceIdsForRequest = selectedServices.map((service) => service.id);
-    const requestKey = `${companySlug}:${serviceIdsForRequest.join(",")}:${weekStart}`;
+    const requestKey = `${companySlug}:${serviceIdsForRequest.join(",")}:${monthStart}`;
     const serviceIds = encodeURIComponent(serviceIdsForRequest.join(","));
 
-    fetch(
-      `/api/companies/${encodeURIComponent(companySlug)}/slots?serviceIds=${serviceIds}&weekStart=${encodeURIComponent(weekStart)}`,
-      { signal: controller.signal },
-    )
-      .then(async (response) => {
+    Promise.all(
+      monthWeekStartsKey.split(",").map(async (weekStart) => {
+        const response = await fetch(
+          `/api/companies/${encodeURIComponent(companySlug)}/slots?serviceIds=${serviceIds}&weekStart=${encodeURIComponent(weekStart)}`,
+          { signal: controller.signal },
+        );
         const result = (await response.json()) as
           | { slots: WeekSlot[] }
           | ApiError;
@@ -159,7 +215,11 @@ export default function BookingWidget({
               "Az időpontok betöltése nem sikerült.",
           );
         }
-        setSlotResult({ key: requestKey, slots: result.slots });
+        return result.slots;
+      }),
+    )
+      .then((slotGroups) => {
+        setSlotResult({ key: requestKey, slots: slotGroups.flat() });
         setError("");
       })
       .catch((cause: unknown) => {
@@ -172,7 +232,7 @@ export default function BookingWidget({
         );
       })
     return () => controller.abort();
-  }, [companySlug, selectedServices, step, weekStart]);
+  }, [companySlug, selectedServices, step, monthStart, monthWeekStartsKey]);
 
   useEffect(() => {
     if (step !== 3 || !lock) return;
@@ -208,9 +268,7 @@ export default function BookingWidget({
           companyId,
           serviceIds: selectedServiceIds,
           start: slot,
-          vehicleMake: vehicle.make,
-          vehicleModel: vehicle.model,
-          vehicleRegistration: vehicle.registration,
+          customFields: bookingFields,
         }),
       });
       const result = (await response.json()) as LockResponse | ApiError;
@@ -313,7 +371,7 @@ export default function BookingWidget({
     setStep(1);
     setSelectedServices([]);
     setSlotResult(null);
-    setVehicle({ make: "", model: "", registration: "" });
+    setBookingFields({});
     setCustomer({ name: "", email: "", phone: "" });
     setPrivacyAccepted(false);
     setPrivacyError(false);
@@ -327,7 +385,7 @@ export default function BookingWidget({
 
   return (
     <section
-      className="mx-auto w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-900/5 sm:p-8"
+      className="mx-auto w-full max-w-6xl rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-900/5 sm:p-8"
       style={{ "--brand-color": primaryColor } as React.CSSProperties}
     >
       <header className="mb-7 border-b border-slate-100 pb-5">
@@ -346,90 +404,102 @@ export default function BookingWidget({
       {step === 1 && (
         <div className="space-y-6">
           <div>
-            <h2 className="text-xl font-bold">1. Jármű és szolgáltatás</h2>
+            <h2 className="text-xl font-bold">1. Szolgáltatások és adatok</h2>
             <p className="mt-1 text-sm text-slate-600">
-              Válassz egy vagy több szolgáltatást, és add meg a jármű adatait.
+              Válassz egy vagy több szolgáltatást
+              {customBookingFields.length ? ", és töltsd ki a kért adatokat." : "."}
             </p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <label className="space-y-1.5 text-sm font-medium">
-              Márka
-              <input
-                autoComplete="off"
-                className="w-full rounded-lg border border-slate-300 px-3 py-2.5"
-                maxLength={100}
-                onChange={(event) =>
-                  setVehicle({ ...vehicle, make: event.target.value })
-                }
-                required
-                value={vehicle.make}
-              />
-            </label>
-            <label className="space-y-1.5 text-sm font-medium">
-              Modell
-              <input
-                autoComplete="off"
-                className="w-full rounded-lg border border-slate-300 px-3 py-2.5"
-                maxLength={100}
-                onChange={(event) =>
-                  setVehicle({ ...vehicle, model: event.target.value })
-                }
-                required
-                value={vehicle.model}
-              />
-            </label>
-            <label className="space-y-1.5 text-sm font-medium">
-              Rendszám
-              <input
-                autoComplete="off"
-                className="w-full rounded-lg border border-slate-300 px-3 py-2.5 uppercase"
-                maxLength={20}
-                onChange={(event) =>
-                  setVehicle({
-                    ...vehicle,
-                    registration: event.target.value,
-                  })
-                }
-                required
-                value={vehicle.registration}
-              />
-            </label>
-          </div>
+          {customBookingFields.length > 0 && (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {customBookingFields.map((field) => (
+                <label
+                  className="space-y-1.5 text-sm font-medium"
+                  key={field.key}
+                >
+                  {field.label}
+                  {field.required && <span className="text-red-600"> *</span>}
+                  <input
+                    autoComplete="off"
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2.5"
+                    maxLength={500}
+                    onChange={(event) =>
+                      setBookingFields((current) => ({
+                        ...current,
+                        [field.key]: event.target.value,
+                      }))
+                    }
+                    required={field.required}
+                    type="text"
+                    value={bookingFields[field.key] ?? ""}
+                  />
+                </label>
+              ))}
+            </div>
+          )}
 
           <div className="space-y-3">
-            <label
-              className="block space-y-1.5 text-sm font-semibold text-slate-800"
-              htmlFor="service-selection"
-            >
-              Szolgáltatások
-              <select
-                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-normal"
-                disabled={!services.length}
-                id="service-selection"
-                onChange={(event) => {
-                  const service = services.find(
-                    (item) => item.id === event.target.value,
-                  );
-                  if (
-                    service &&
-                    !selectedServices.some((item) => item.id === service.id)
-                  ) {
-                    setSelectedServices((current) => [...current, service]);
-                  }
-                }}
-                value=""
+            <div className="space-y-2">
+              <h3
+                className="text-sm font-semibold text-slate-800"
+                id="service-selection-label"
               >
-                <option disabled value="">
-                  Kérjük, válasszon szolgáltatást...
-                </option>
-                {services.map((service) => (
-                  <option key={service.id} value={service.id}>
-                    {service.nev} - {Number(service.ar).toLocaleString("hu-HU")} Ft -{" "}
-                    {service.idotartam_percben} perc
-                  </option>
-                ))}
-              </select>
-            </label>
+                Szolgáltatások
+              </h3>
+              <div
+                aria-labelledby="service-selection-label"
+                className="grid gap-2 sm:grid-cols-2"
+              >
+                {services.map((service) => {
+                  const isSelected = selectedServices.some(
+                    (item) => item.id === service.id,
+                  );
+                  return (
+                    <button
+                      aria-label={service.nev}
+                      aria-pressed={isSelected}
+                      className={`flex min-h-16 items-center justify-between gap-3 rounded-xl border p-3 text-left transition ${
+                        isSelected
+                          ? "border-yellow-400 bg-yellow-100 text-slate-950"
+                          : "border-slate-200 bg-white text-slate-800 hover:border-slate-400 hover:bg-slate-50"
+                      }`}
+                      key={service.id}
+                      onClick={() =>
+                        setSelectedServices((current) =>
+                          current.some((item) => item.id === service.id)
+                            ? current.filter((item) => item.id !== service.id)
+                            : [...current, service],
+                        )
+                      }
+                      type="button"
+                    >
+                      <span className="min-w-0">
+                        <span className="block font-semibold">{service.nev}</span>
+                        <span className="mt-1 block text-xs text-slate-600">
+                          {service.idotartam_percben} perc ·{" "}
+                          {Number(service.ar).toLocaleString("hu-HU")} Ft
+                        </span>
+                        {service.leiras && (
+                          <span className="mt-1 block text-xs text-slate-500">
+                            {service.leiras}
+                          </span>
+                        )}
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        className={`flex size-5 shrink-0 items-center justify-center rounded-full border text-xs font-bold ${
+                          isSelected
+                            ? "border-yellow-500 bg-yellow-400 text-yellow-950"
+                            : "border-slate-300"
+                        }`}
+                      >
+                        {isSelected ? "✓" : ""}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             {services.length === 0 && (
               <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
                 Jelenleg nincs foglalható szolgáltatás.
@@ -475,10 +545,7 @@ export default function BookingWidget({
           <button
             className="w-full rounded-lg bg-[var(--brand-color)] px-4 py-3 font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             disabled={
-              !selectedServices.length ||
-              !vehicle.make.trim() ||
-              !vehicle.model.trim() ||
-              !vehicle.registration.trim()
+              !selectedServices.length || !requiredBookingFieldsComplete
             }
             onClick={() => setStep(2)}
             type="button"
@@ -507,118 +574,162 @@ export default function BookingWidget({
           </p>
           <div className="mt-5 flex items-center justify-between gap-3">
             <button
-              aria-label="Előző hét"
+              aria-label="Előző hónap"
               className="rounded-lg border border-slate-300 px-3 py-2 font-medium text-slate-700 hover:bg-slate-50"
               onClick={() => {
-                setWeekStart((current) => addDays(current, -7));
+                const nextMonth = shiftMonth(monthStart, -1);
+                setMonthStart(nextMonth);
+                setSelectedDay(nextMonth);
                 setError("");
               }}
               type="button"
             >
-              ← Előző hét
+              ← Előző hónap
             </button>
             <p aria-live="polite" className="text-center text-sm font-semibold text-slate-800">
-              {weekLabel}
+              {monthLabel}
             </p>
             <button
-              aria-label="Következő hét"
+              aria-label="Következő hónap"
               className="rounded-lg border border-slate-300 px-3 py-2 font-medium text-slate-700 hover:bg-slate-50"
               onClick={() => {
-                setWeekStart((current) => addDays(current, 7));
+                const nextMonth = shiftMonth(monthStart, 1);
+                setMonthStart(nextMonth);
+                setSelectedDay(nextMonth);
                 setError("");
               }}
               type="button"
             >
-              Következő hét →
+              Következő hónap →
             </button>
           </div>
           {loadingSlots ? (
             <p className="mt-6 text-sm text-slate-600">Időpontok betöltése...</p>
-          ) : weekSlots.length ? (
-            <div className="mt-5 overflow-x-auto">
+          ) : (
+            <div className="mt-5 grid items-start gap-5 md:grid-cols-[minmax(17rem,0.8fr)_minmax(0,1.8fr)]">
               <div
-                aria-label="Heti időpontnaptár"
-                className="min-w-[58rem]"
-                role="grid"
+                aria-label="Havi naptár – nap kiválasztása"
+                className="rounded-xl border border-slate-200 bg-slate-50 p-3"
               >
-                <div
-                  className="grid grid-cols-[4rem_repeat(7,minmax(7rem,1fr))]"
-                  role="row"
-                >
-                  <span className="p-2 text-xs font-medium text-slate-500">Idő</span>
-                  {weekDays.map((day) => (
-                    <div
-                      className="border-b border-slate-200 p-2 text-center text-xs font-semibold capitalize text-slate-800"
-                      key={day}
-                      role="columnheader"
-                    >
-                      {dateFormatter.format(new Date(`${day}T12:00:00.000Z`))}
-                    </div>
+                <div className="mb-2 grid grid-cols-7 text-center text-xs font-semibold uppercase text-slate-500">
+                  {["H", "K", "Sze", "Cs", "P", "Szo", "V"].map((day, index) => (
+                    <span key={`${day}-${index}`}>{day}</span>
                   ))}
                 </div>
-                {timeRows.map((time) => (
-                  <div
-                    className="grid grid-cols-[4rem_repeat(7,minmax(7rem,1fr))]"
-                    key={time}
-                    role="row"
-                  >
-                    <span
-                      className="border-b border-slate-100 p-2 text-xs font-medium text-slate-500"
-                      role="rowheader"
-                    >
-                      {time}
-                    </span>
-                    {weekDays.map((day) => {
-                      const daySlots = weekSlots.filter(
-                        (slot) => slotDate(slot) === day && slotTime(slot) === time,
-                      );
+                <div className="grid grid-cols-7 gap-1">
+                  {calendarDays.map((day) => {
+                    const date = new Date(`${day}T12:00:00.000Z`);
+                    const isSelected = day === selectedDay;
+                    const isCurrentMonth = day.startsWith(monthStart.slice(0, 7));
+                    const hasAvailability = weekSlots.some(
+                      (slot) =>
+                        slot.available &&
+                        slotDate(slot) === day,
+                    );
+                    return (
+                      <button
+                        aria-label={dateFormatter.format(date)}
+                        aria-pressed={isSelected}
+                        className={`relative aspect-square rounded-lg text-sm transition ${
+                          isSelected
+                            ? "bg-blue-700 font-bold text-white"
+                            : isCurrentMonth
+                              ? "text-slate-800 hover:bg-white"
+                              : "text-slate-400 hover:bg-white"
+                        }`}
+                        key={day}
+                        onClick={() => {
+                          setSelectedDay(day);
+                          if (!isCurrentMonth) setMonthStart(getMonthStart(day));
+                          setError("");
+                        }}
+                        type="button"
+                      >
+                        {date.getUTCDate()}
+                        {hasAvailability && (
+                          <span
+                            aria-hidden="true"
+                            className={`absolute bottom-1 left-1/2 size-1 -translate-x-1/2 rounded-full ${
+                              isSelected ? "bg-white" : "bg-emerald-500"
+                            }`}
+                          />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-3 text-center text-xs text-slate-500">
+                  A zöld ponttal jelölt napokon van szabad időpont.
+                </p>
+              </div>
 
-                      return (
-                        <div
-                          className="flex min-h-12 items-center justify-center border-b border-l border-slate-100 p-1"
-                          key={day}
-                          role="gridcell"
-                        >
-                          {daySlots.length ? (
-                            daySlots.map((slot) => {
-                              const isPast =
-                                new Date(slot.slotStart).getTime() <= Date.now();
-                              const isDisabled = loading || !slot.available || isPast;
-                              return (
-                                <button
-                                  aria-label={`${time} ${slot.available && !isPast ? "szabad" : isPast ? "lejárt" : "foglalt"}, ${dateFormatter.format(new Date(`${day}T12:00:00.000Z`))}`}
-                                  className={`w-full rounded-md border px-1 py-2 text-sm font-semibold ${
-                                    isPast
-                                      ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-                                      : slot.available
-                                        ? "border-blue-200 bg-blue-50 text-blue-800 hover:border-blue-600 hover:bg-blue-100"
-                                        : "cursor-not-allowed border-red-100 bg-red-50 line-through text-red-500"
-                                  } disabled:opacity-100`}
-                                  disabled={isDisabled}
-                                  key={slot.slotStart}
-                                  onClick={() => void handleSelectSlot(slot.slotStart)}
-                                  type="button"
-                                >
-                                  {time}
-                                </button>
-                              );
-                            })
-                          ) : (
-                            <span aria-hidden="true" className="text-slate-200">
-                              —
-                            </span>
-                          )}
+              <div
+                aria-label="A kiválasztott nap időpontjai"
+                className="space-y-4"
+              >
+                <h3 className="font-semibold capitalize text-slate-900">
+                  {dateFormatter.format(new Date(`${selectedDay}T12:00:00.000Z`))}
+                </h3>
+                {availableSlotsForDay.length ? (
+                  <>
+                    <section className="rounded-xl border border-slate-200 p-4">
+                      <h4 className="mb-3 text-sm font-bold text-slate-800">
+                        Délelőtt
+                      </h4>
+                      {morningSlots.length ? (
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                          {morningSlots.map((slot) => (
+                            <button
+                              aria-label={`${slotTime(slot)} szabad, ${dateFormatter.format(new Date(`${selectedDay}T12:00:00.000Z`))}`}
+                              className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-sm font-semibold text-blue-800 hover:border-blue-600 hover:bg-blue-100 disabled:opacity-60"
+                              disabled={loading}
+                              key={slot.slotStart}
+                              onClick={() => void handleSelectSlot(slot.slotStart)}
+                              type="button"
+                            >
+                              {slotTime(slot)}
+                            </button>
+                          ))}
                         </div>
-                      );
-                    })}
-                  </div>
-                ))}
+                      ) : (
+                        <p className="text-sm text-slate-500">
+                          Nincs szabad délelőtti időpont.
+                        </p>
+                      )}
+                    </section>
+                    <section className="rounded-xl border border-slate-200 border-t-2 border-t-gray-400 p-4">
+                      <h4 className="mb-3 text-sm font-bold text-slate-800">
+                        Délután
+                      </h4>
+                      {afternoonSlots.length ? (
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                          {afternoonSlots.map((slot) => (
+                            <button
+                              aria-label={`${slotTime(slot)} szabad, ${dateFormatter.format(new Date(`${selectedDay}T12:00:00.000Z`))}`}
+                              className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-sm font-semibold text-blue-800 hover:border-blue-600 hover:bg-blue-100 disabled:opacity-60"
+                              disabled={loading}
+                              key={slot.slotStart}
+                              onClick={() => void handleSelectSlot(slot.slotStart)}
+                              type="button"
+                            >
+                              {slotTime(slot)}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-500">
+                          Nincs szabad délutáni időpont.
+                        </p>
+                      )}
+                    </section>
+                  </>
+                ) : (
+                  <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
+                    Erre a napra nincs szabad időpont.
+                  </p>
+                )}
               </div>
             </div>
-          ) : (
-            <p className="mt-5 rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
-              Erre a hétre nincs megjeleníthető időpont.
-            </p>
           )}
           {loading && (
             <p className="mt-4 text-sm text-slate-600">Időpont zárolása...</p>

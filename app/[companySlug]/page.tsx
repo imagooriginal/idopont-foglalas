@@ -10,6 +10,27 @@ interface CompanyBookingPageProps {
   params: Promise<{ companySlug: string }>;
 }
 
+interface CustomBookingField {
+  key: string;
+  label: string;
+  type: "text";
+  required: boolean;
+}
+
+function isCustomBookingField(value: unknown): value is CustomBookingField {
+  if (!value || typeof value !== "object") return false;
+  const field = value as Record<string, unknown>;
+  return (
+    typeof field.key === "string" &&
+    /^[a-z0-9_]{1,40}$/.test(field.key) &&
+    typeof field.label === "string" &&
+    field.label.length > 0 &&
+    field.label.length <= 80 &&
+    field.type === "text" &&
+    typeof field.required === "boolean"
+  );
+}
+
 function getLocalDay(timeZone: string) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     year: "numeric",
@@ -42,7 +63,7 @@ export default async function CompanyBookingPage({
   const supabase = createSupabasePublicClient();
   const { data: company, error: companyError } = await supabase
     .from("companies")
-    .select("id, nev, slug, time_zone, slot_interval_minutes, primary_color")
+    .select("id, nev, slug, time_zone, slot_interval_minutes, primary_color, custom_booking_fields")
     .eq("slug", companySlug)
     .maybeSingle();
 
@@ -56,8 +77,9 @@ export default async function CompanyBookingPage({
 
   const { data: services, error: servicesError } = await supabase
     .from("services")
-    .select("id, nev, idotartam_percben, ar")
+    .select("id, nev, idotartam_percben, ar, leiras")
     .eq("cég_id", company.id)
+    .eq("is_active", true)
     .order("display_order", { ascending: true })
     .order("nev", { ascending: true });
 
@@ -72,6 +94,9 @@ export default async function CompanyBookingPage({
     /^#[0-9a-fA-F]{6}$/.test(company.primary_color)
       ? company.primary_color
       : "#1d4ed8";
+  const customBookingFields = Array.isArray(company.custom_booking_fields)
+    ? company.custom_booking_fields.filter(isCustomBookingField)
+    : [];
 
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-10 sm:px-6 sm:py-16">
@@ -79,6 +104,7 @@ export default async function CompanyBookingPage({
         companyId={company.id}
         companyName={company.nev}
         companySlug={company.slug}
+        customBookingFields={customBookingFields}
         slotIntervalMinutes={company.slot_interval_minutes}
         initialDay={getLocalDay(timeZone)}
         primaryColor={primaryColor}

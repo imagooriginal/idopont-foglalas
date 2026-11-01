@@ -29,12 +29,26 @@ adatbázissal és Auth-tal, valamint Resend e-mail-küldéssel.
    majd a
    [`supabase/migrations/20261029130000_multiple_booking_services.sql`](./supabase/migrations/20261029130000_multiple_booking_services.sql)
    majd a
+   [`supabase/migrations/20261030230500_fix_booking_lock_ambiguous_locked_until.sql`](./supabase/migrations/20261030230500_fix_booking_lock_ambiguous_locked_until.sql)
+   majd a
    [`supabase/migrations/20261031190000_weekly_slot_grid.sql`](./supabase/migrations/20261031190000_weekly_slot_grid.sql)
    majd a
    [`supabase/migrations/20261031220000_saas_management_and_booking_consent.sql`](./supabase/migrations/20261031220000_saas_management_and_booking_consent.sql)
+   majd a
+   [`supabase/migrations/20261101220000_company_hours_and_service_permissions.sql`](./supabase/migrations/20261101220000_company_hours_and_service_permissions.sql),
+   majd a
+   [`supabase/migrations/20261102220000_dynamic_booking_fields_and_service_access.sql`](./supabase/migrations/20261102220000_dynamic_booking_fields_and_service_access.sql)
+   majd a
+   [`supabase/migrations/20261102230000_booking_rpc_and_public_hours_fallback.sql`](./supabase/migrations/20261102230000_booking_rpc_and_public_hours_fallback.sql)
+   végül a
+   [`supabase/migrations/20261103000100_fix_booking_lock_json_object_count.sql`](./supabase/migrations/20261103000100_fix_booking_lock_json_object_count.sql)
    migrációt. Ne cseréld le az eredeti SQL-t a migrációkra. Előtte készíts
    adatbázis-mentést, és oldd fel az első migráció által jelzett esetleges
-   átfedő aktív foglalásokat.
+   átfedő aktív foglalásokat. Ha a korábbi migrációk már lefutottak, de egy
+   tenantnál hiányoznak a nyitvatartási sorok, futtasd le külön a
+   `20261102230000_booking_rpc_and_public_hours_fallback.sql` fájlt is: ez a
+   hétköznapi nyitvatartást a meglévő tenantokhoz is visszatölti, és frissíti
+   a Supabase API sémagyorsítótárát.
 
 4. Hozz létre egy platform-admin felhasználót a Supabase Authban, majd a SQL
    Editorban add hozzá az admin táblához:
@@ -55,9 +69,17 @@ adatbázissal és Auth-tal, valamint Resend e-mail-küldéssel.
    `free`, `starter` és `pro` értékek adminisztrátori csomagcímkék; fizetési
    szolgáltató vagy automatikus előfizetés-kezelés nincs bekötve.
 
-5. Töltsd fel a `company_business_hours` táblát. A `weekday` értéke
-   `0 = vasárnap` ... `6 = szombat`; a napi nyitvatartás időzónája a
-   `companies.time_zone` mező.
+5. Az új cégek hétköznapi nyitvatartási rekordjai automatikusan létrejönnek.
+   A részletes heti nyitvatartás és az ideiglenes zárvatartások a szolgáltatói
+   dashboardon módosíthatók. A `weekday` értéke `0 = vasárnap` ...
+   `6 = szombat`; a napi nyitvatartás időzónája a `companies.time_zone` mező.
+   Ha egy céghez egyáltalán nincs nyitvatartási rekord, a publikus slot RPC
+   hétköznapokon 08:00–16:00 közötti ideiglenes időpontokat számol, a
+   foglalásokkal és blokkolásokkal ütközést továbbra is ellenőrizve. A
+   `create_booking_lock` RPC a vendégfoglalás egyetlen publikus írási felülete;
+   ne engedélyezz közvetlen anon `INSERT`-et a `bookings` táblán.
+   A Superadmin felületen mezősoronként állíthatók be a foglaláskori extra
+   kérdések; a `*` jellel kezdődő mező kötelező.
 
 6. Indítsd el az alkalmazást:
 

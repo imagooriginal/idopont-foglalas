@@ -33,7 +33,7 @@ export default async function SuperadminPage({
   const { data: companyData, error: companiesError } = await admin
     .from("companies")
     .select(
-      "id, nev, slug, owner_id, plan, primary_color, subscription_started_at",
+      "id, status, nev, slug, owner_id, plan, primary_color, subscription_started_at, nyitvatartas_kezdet, nyitvatartas_vege, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, time_zone, slot_interval_minutes",
     )
     .order("nev", { ascending: true });
   if (companiesError) {
@@ -67,7 +67,7 @@ export default async function SuperadminPage({
   if (selectedCompany) {
     const { data, error } = await admin
       .from("services")
-      .select("id, nev, idotartam_percben, ar, display_order")
+      .select("id, nev, idotartam_percben, ar, display_order, leiras, is_active")
       .eq("cég_id", selectedCompany.id)
       .order("display_order", { ascending: true })
       .order("nev", { ascending: true });

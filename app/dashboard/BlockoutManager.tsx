@@ -116,10 +116,11 @@ export default function BlockoutManager({
           </span>
           <div>
             <h2 className="text-lg font-bold text-slate-950">
-              Szünetek és blokkolások
+              Ideiglenes zárvatartások
             </h2>
           <p className="mt-1 text-sm text-slate-600">
-            A blokkolás az online foglalásból is kiveszi az érintett időt.
+            Szabadságot, ünnepnapot vagy más zárvatartást rögzíthetsz; az érintett
+            időpontok nem lesznek foglalhatók.
           </p>
           </div>
         </div>
@@ -129,7 +130,7 @@ export default function BlockoutManager({
           type="button"
         >
           <span aria-hidden="true" className="text-lg leading-none">+</span>
-          Időpont blokkolása
+          Zárvatartás hozzáadása
         </button>
       </div>
 
@@ -151,10 +152,10 @@ export default function BlockoutManager({
             </svg>
           </span>
           <p className="mt-3 text-sm font-semibold text-slate-800">
-            Nincs közelgő blokkolás
+            Nincs közelgő zárvatartás
           </p>
           <p className="mt-1 text-xs leading-5 text-slate-500">
-            A műhely szüneteit itt rögzítheted.
+            A             A szabadságokat és ünnepnapokat itt rögzítheted.
           </p>
         </div>
       ) : (
@@ -198,13 +199,13 @@ export default function BlockoutManager({
       )}
 
       <button
-        aria-label="Időpont blokkolása"
+        aria-label="Zárvatartás hozzáadása"
         className="fixed bottom-24 right-4 z-50 inline-flex items-center gap-2 rounded-full bg-blue-700 px-5 py-3.5 text-sm font-bold text-white shadow-lg shadow-blue-900/25 transition hover:-translate-y-0.5 hover:bg-blue-800 hover:shadow-xl sm:hidden"
         onClick={() => setOpen(true)}
         type="button"
       >
         <span aria-hidden="true" className="text-xl leading-none">+</span>
-        Blokkolás
+        Zárvatartás
       </button>
 
       {open && (
@@ -221,10 +222,10 @@ export default function BlockoutManager({
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h3 className="text-xl font-bold" id="blockout-title">
-                  Időpont blokkolása
+                  Ideiglenes zárvatartás
                 </h3>
                 <p className="mt-1 text-sm text-slate-600">
-                  Műhelyidő, ebédszünet vagy telefonon rögzített foglalás.
+                  Add meg a zárvatartás kezdetét és végét.
                 </p>
               </div>
               <button
@@ -306,7 +307,7 @@ export default function BlockoutManager({
                 disabled={pending}
                 type="submit"
               >
-                {pending ? "Mentés..." : "Blokkolás mentése"}
+                {pending ? "Mentés..." : "Zárvatartás mentése"}
               </button>
             </div>
           </form>
