@@ -1,8 +1,5 @@
+import { slotsQuerySchema } from "@/lib/security";
 import { createSupabasePublicClient } from "@/lib/supabase/public";
-
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 
 export async function GET(
   request: Request,
@@ -10,39 +7,59 @@ export async function GET(
 ) {
   const { companySlug } = await params;
   const url = new URL(request.url);
-  const serviceIds = (url.searchParams.get("serviceIds") ?? "").split(",");
-  const weekStart = url.searchParams.get("weekStart") ?? "";
+  const rawServiceIds = (url.searchParams.get("serviceIds") ?? "")
+    .split(",")
+    .filter(Boolean);
+  const rawWeekStart = url.searchParams.get("weekStart") ?? "";
 
-  if (
-    !serviceIds.length ||
-    serviceIds.some((serviceId) => !uuidPattern.test(serviceId)) ||
-    new Set(serviceIds).size !== serviceIds.length ||
-    !datePattern.test(weekStart)
-  ) {
-    return Response.json({ error: "Érvénytelen szolgáltatás vagy dátum." }, { status: 400 });
+  const parsed = slotsQuerySchema.safeParse({
+    companySlug,
+    serviceIds: rawServiceIds,
+    weekStart: rawWeekStart,
+  });
+
+  if (!parsed.success) {
+    const hasWeekStartError = parsed.error.issues.some((issue) =>
+      issue.path.includes("weekStart"),
+    );
+    const hasServiceError = parsed.error.issues.some(
+      (issue) =>
+        issue.path.includes("serviceIds") || issue.path.includes("companySlug"),
+    );
+    if (!hasServiceError && hasWeekStartError && /^\d{4}-\d{2}-\d{2}$/.test(rawWeekStart)) {
+      return Response.json(
+        { error: "A hét kezdőnapja érvénytelen." },
+        { status: 400 },
+      );
+    }
+    return Response.json(
+      { error: "Érvénytelen szolgáltatás vagy dátum." },
+      { status: 400 },
+    );
   }
 
-  const parsedDay = new Date(`${weekStart}T00:00:00.000Z`);
-  if (
-    Number.isNaN(parsedDay.getTime()) ||
-    parsedDay.toISOString().slice(0, 10) !== weekStart ||
-    parsedDay.getUTCDay() !== 1
-  ) {
-    return Response.json({ error: "A hét kezdőnapja érvénytelen." }, { status: 400 });
-  }
+  const { serviceIds, weekStart } = parsed.data;
 
   const supabase = createSupabasePublicClient();
   const { data: company, error: companyError } = await supabase
     .from("companies")
     .select("id")
-    .eq("slug", companySlug)
+    .eq("slug", parsed.data.companySlug)
     .maybeSingle();
 
   if (companyError) {
     console.error("Company lookup failed for public slot query", companyError);
-    return Response.json({ error: "Az elérhetőségek nem tölthetők be." }, { status: 500 });
+    return Response.json(
+      { error: "Az elérhetőségek nem tölthetők be." },
+      { status: 500 },
+    );
   }
-  if (!company) return Response.json({ error: "A szolgáltató nem található." }, { status: 404 });
+  if (!company) {
+    return Response.json(
+      { error: "A szolgáltató nem található." },
+      { status: 404 },
+    );
+  }
 
   const { data, error } = await supabase.rpc("list_week_slot_grid", {
     p_company_id: company.id,
@@ -73,7 +90,10 @@ export async function GET(
         { status: 409 },
       );
     }
-    return Response.json({ error: "Az elérhetőségek nem tölthetők be." }, { status: 500 });
+    return Response.json(
+      { error: "Az elérhetőségek nem tölthetők be." },
+      { status: 500 },
+    );
   }
 
   return Response.json({

@@ -3,22 +3,13 @@ import {
   createBookingEmailHtml,
   createGoogleCalendarUrl,
   createIcsCalendarFile,
+  sanitizeSingleLineText,
 } from "@/lib/calendar";
+import { confirmRequestSchema, releaseActiveClientLock } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 const privacyPolicyVersion = "2026-10-31";
-
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-interface ConfirmationRequest {
-  lockToken?: unknown;
-  name?: unknown;
-  email?: unknown;
-  phone?: unknown;
-  privacyAccepted?: unknown;
-}
 
 interface BookingEmail {
   to: string;
@@ -59,36 +50,31 @@ async function sendBookingEmail(
 }
 
 export async function POST(request: Request) {
-  let body: ConfirmationRequest;
+  let rawBody: unknown;
   try {
-    body = (await request.json()) as ConfirmationRequest;
+    rawBody = await request.json();
   } catch {
-    return Response.json({ error: "A kérés törzse nem érvényes JSON." }, { status: 400 });
+    return Response.json(
+      { error: "A kérés törzse nem érvényes JSON." },
+      { status: 400 },
+    );
   }
 
-  if (
-    typeof body.lockToken !== "string" ||
-    !uuidPattern.test(body.lockToken) ||
-    typeof body.name !== "string" ||
-    !body.name.trim() ||
-    body.name.trim().length > 200 ||
-    typeof body.email !== "string" ||
-    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim()) ||
-    body.email.trim().length > 320 ||
-    body.privacyAccepted !== true ||
-    (body.phone !== undefined &&
-      body.phone !== null &&
-      (typeof body.phone !== "string" || body.phone.trim().length > 40))
-  ) {
-    return Response.json({ error: "Adj meg érvényes nevet és e-mail-címet." }, { status: 400 });
+  const parsed = confirmRequestSchema.safeParse(rawBody);
+  if (!parsed.success) {
+    return Response.json(
+      { error: "Adj meg érvényes nevet és e-mail-címet." },
+      { status: 400 },
+    );
   }
 
+  const body = parsed.data;
   const supabase = await createSupabaseServerClient();
   const { data: authData, error: authError } = await supabase.auth.getUser();
   if (
     authError ||
     !authData.user?.email_confirmed_at ||
-    authData.user.email?.toLowerCase() !== body.email.trim().toLowerCase()
+    authData.user.email?.toLowerCase() !== body.email.toLowerCase()
   ) {
     return Response.json(
       { error: "A foglalás előtt erősítsd meg a megadott e-mail-címet." },
@@ -100,22 +86,26 @@ export async function POST(request: Request) {
     "confirm_booking_with_privacy",
     {
       p_lock_token: body.lockToken,
-      p_customer_name: body.name.trim(),
-      p_customer_email: body.email.trim(),
-      p_customer_phone:
-        typeof body.phone === "string" ? body.phone.trim() || null : null,
+      p_customer_name: body.name,
+      p_customer_email: body.email,
+      p_customer_phone: body.phone ? body.phone : null,
       p_privacy_accepted: true,
       p_privacy_policy_version: privacyPolicyVersion,
     },
   );
 
-  if (confirmError) {
+  if (confirmError || typeof bookingId !== "string" || !bookingId) {
     console.error("Booking confirmation RPC failed", confirmError);
     return Response.json(
-      { error: "A foglalás nem véglegesíthető. Lehet, hogy lejárt az időzárolás." },
+      {
+        error:
+          "A foglalás nem véglegesíthető. Lehet, hogy lejárt az időzárolás.",
+      },
       { status: 409 },
     );
   }
+
+  releaseActiveClientLock(body.lockToken);
 
   const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.RESEND_FROM_EMAIL;
@@ -133,14 +123,19 @@ export async function POST(request: Request) {
       .from("bookings")
       .select("*")
       .eq("id", bookingId)
+      .eq("status", "confirmed")
       .single();
 
-    if (bookingError) throw new Error(`Foglalás betöltése nem sikerült: ${bookingError.message}`);
+    if (bookingError || !booking) {
+      throw new Error(
+        `Foglalás betöltése nem sikerült: ${bookingError?.message ?? "Nem található visszaigazolt foglalás."}`,
+      );
+    }
 
     const [companyResult, bookingServicesResult] = await Promise.all([
       admin
         .from("companies")
-        .select("id, nev, owner_id, time_zone")
+        .select("id, nev, owner_id, time_zone, custom_booking_fields")
         .eq("id", booking.cég_id)
         .single(),
       admin
@@ -151,10 +146,14 @@ export async function POST(request: Request) {
     ]);
 
     if (companyResult.error) {
-      throw new Error(`Szolgáltató betöltése nem sikerült: ${companyResult.error.message}`);
+      throw new Error(
+        `Szolgáltató betöltése nem sikerült: ${companyResult.error.message}`,
+      );
     }
     if (bookingServicesResult.error) {
-      throw new Error(`Foglalási szolgáltatások betöltése nem sikerült: ${bookingServicesResult.error.message}`);
+      throw new Error(
+        `Foglalási szolgáltatások betöltése nem sikerült: ${bookingServicesResult.error.message}`,
+      );
     }
 
     const serviceIds = bookingServicesResult.data.length
@@ -167,7 +166,9 @@ export async function POST(request: Request) {
       .in("id", serviceIds);
 
     if (servicesError) {
-      throw new Error(`Szolgáltatások betöltése nem sikerült: ${servicesError.message}`);
+      throw new Error(
+        `Szolgáltatások betöltése nem sikerült: ${servicesError.message}`,
+      );
     }
 
     const serviceNames = serviceIds
@@ -176,11 +177,61 @@ export async function POST(request: Request) {
     if (serviceNames.length !== serviceIds.length) {
       throw new Error("A foglalás egyik szolgáltatása nem található.");
     }
-    const serviceName = serviceNames.join(" + ");
+    const serviceName = sanitizeSingleLineText(serviceNames.join(" + "));
 
     const { data: ownerResult, error: ownerError } =
       await admin.auth.admin.getUserById(companyResult.data.owner_id);
-    if (ownerError) throw new Error(`Szolgáltatói e-mail betöltése nem sikerült: ${ownerError.message}`);
+    if (ownerError) {
+      throw new Error(
+        `Szolgáltatói e-mail betöltése nem sikerült: ${ownerError.message}`,
+      );
+    }
+
+    const extraFields: Array<[string, string]> = [];
+    const vehicleLabel = [booking.jarmu_marka, booking.jarmu_modell]
+      .filter(Boolean)
+      .join(" ");
+    if (vehicleLabel) {
+      extraFields.push(["Jármű", sanitizeSingleLineText(vehicleLabel)]);
+    }
+    if (booking.jarmu_rendszam) {
+      extraFields.push([
+        "Rendszám",
+        sanitizeSingleLineText(String(booking.jarmu_rendszam)),
+      ]);
+    }
+
+    if (
+      booking.custom_fields &&
+      typeof booking.custom_fields === "object" &&
+      !Array.isArray(booking.custom_fields)
+    ) {
+      const labelMap = new Map<string, string>();
+      if (Array.isArray(companyResult.data.custom_booking_fields)) {
+        for (const item of companyResult.data.custom_booking_fields) {
+          if (
+            item &&
+            typeof item === "object" &&
+            typeof (item as { key?: unknown }).key === "string" &&
+            typeof (item as { label?: unknown }).label === "string"
+          ) {
+            labelMap.set(
+              (item as { key: string }).key,
+              (item as { label: string }).label,
+            );
+          }
+        }
+      }
+
+      for (const [key, value] of Object.entries(booking.custom_fields)) {
+        if (typeof value === "string" && value.trim()) {
+          extraFields.push([
+            sanitizeSingleLineText(labelMap.get(key) ?? key),
+            sanitizeSingleLineText(value),
+          ]);
+        }
+      }
+    }
 
     const start = new Date(booking.kezdes_ideje);
     const end = new Date(booking.vege_ideje);
@@ -195,9 +246,14 @@ export async function POST(request: Request) {
       timeStyle: "short",
       timeZone,
     }).format(end);
-    const description = `${serviceName} – ${companyResult.data.nev}. Ügyfél: ${booking.ugyfel_nev}.`;
+    const safeCompanyName = sanitizeSingleLineText(companyResult.data.nev);
+    const safeCustomerName = sanitizeSingleLineText(booking.ugyfel_nev ?? "");
+    const extraSummary = extraFields.length
+      ? ` ${extraFields.map(([k, v]) => `${k}: ${v}`).join(", ")}.`
+      : "";
+    const description = `${serviceName} – ${safeCompanyName}. Ügyfél: ${safeCustomerName}.${extraSummary}`;
     const calendarEvent = {
-      title: `${serviceName} – ${companyResult.data.nev}`,
+      title: `${serviceName} – ${safeCompanyName}`,
       description,
       start,
       end,
@@ -208,13 +264,14 @@ export async function POST(request: Request) {
     const customerEmail: BookingEmail = {
       to: booking.ugyfel_email,
       html: createBookingEmailHtml({
-        greeting: `Kedves ${booking.ugyfel_nev}!`,
-        companyName: companyResult.data.nev,
+        greeting: `Kedves ${safeCustomerName}!`,
+        companyName: safeCompanyName,
         serviceName,
-        customerName: booking.ugyfel_nev,
+        customerName: safeCustomerName,
         start: startLabel,
         end: endLabel,
         googleCalendarUrl,
+        extraFields,
       }),
       ics,
     };
@@ -227,13 +284,14 @@ export async function POST(request: Request) {
         ...customerEmail,
         to: ownerEmail,
         html: createBookingEmailHtml({
-          greeting: `Új foglalás: ${booking.ugyfel_nev}`,
-          companyName: companyResult.data.nev,
+          greeting: `Új foglalás: ${safeCustomerName}`,
+          companyName: safeCompanyName,
           serviceName,
-          customerName: booking.ugyfel_nev,
+          customerName: safeCustomerName,
           start: startLabel,
           end: endLabel,
           googleCalendarUrl,
+          extraFields,
         }),
       });
     } else {
@@ -245,8 +303,7 @@ export async function POST(request: Request) {
     const delivery = await Promise.all(
       recipients.map((recipient) => sendBookingEmail(resend, from, recipient)),
     );
-    const allSent =
-      allRecipientsConfigured && delivery.every(Boolean);
+    const allSent = allRecipientsConfigured && delivery.every(Boolean);
 
     return Response.json({
       bookingId,
@@ -256,11 +313,15 @@ export async function POST(request: Request) {
         : "A foglalás sikeres, de legalább egy visszaigazoló e-mail kézbesítése nem sikerült.",
     });
   } catch (error) {
-    console.error("Booking confirmed but confirmation email setup failed", error);
+    console.error(
+      "Booking confirmed but confirmation email setup failed",
+      error,
+    );
     return Response.json({
       bookingId,
       emailStatus: "failed",
-      warning: "A foglalás sikeres, de a visszaigazoló e-mail küldése nem sikerült.",
+      warning:
+        "A foglalás sikeres, de a visszaigazoló e-mail küldése nem sikerült.",
     });
   }
 }

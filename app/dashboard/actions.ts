@@ -2,6 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { z } from "zod";
+import { uuidSchema } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -29,26 +31,84 @@ type CustomBookingField = {
   required: boolean;
 };
 
-const companyIdPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const timeStringSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 
-function isValidServiceInput(name: string, duration: number, price: number) {
-  return (
-    Boolean(name) &&
-    name.length <= 100 &&
-    Number.isInteger(duration) &&
-    duration >= 1 &&
-    duration <= 1440 &&
-    Number.isFinite(price) &&
-    price >= 0 &&
-    price <= 1_000_000_000
+const serviceFieldsSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  duration: z.number().int().min(1).max(1440),
+  price: z.number().finite().min(0).max(1_000_000_000),
+  description: z.string().trim().max(1000).default(""),
+});
+
+const businessHourEntrySchema = z
+  .object({
+    weekday: z.number().int().min(0).max(6),
+    is_open: z.boolean(),
+    opens_at: timeStringSchema,
+    closes_at: timeStringSchema,
+  })
+  .refine((item) => !item.is_open || item.opens_at < item.closes_at, {
+    message: "A nyitási időpontnak korábbinak kell lennie a zárásnál.",
+  });
+
+const businessHourScheduleSchema = z
+  .array(businessHourEntrySchema)
+  .length(7)
+  .refine(
+    (entries) =>
+      new Set(entries.map((entry) => entry.weekday)).size === entries.length,
+    "A hét minden napját pontosan egyszer kell megadni.",
   );
-}
+
+const tenantBaseSchema = z
+  .object({
+    name: z.string().trim().min(1).max(100),
+    slug: z
+      .string()
+      .trim()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+    primaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+    plan: z.enum(["free", "starter", "pro"]),
+    openingTime: timeStringSchema,
+    closingTime: timeStringSchema,
+    timeZone: z
+      .string()
+      .trim()
+      .min(1)
+      .max(100)
+      .refine((val) => isValidTimeZone(val)),
+    slotIntervalMinutes: z.number().int().min(5).max(240),
+    canEditPrices: z.boolean(),
+    canManageServicesAdvanced: z.boolean(),
+  })
+  .refine((data) => data.openingTime < data.closingTime);
+
+const signInSchema = z.object({
+  email: z.string().trim().min(3).max(320).includes("@"),
+  password: z.string().min(8).max(256),
+});
+
+const blockoutSchema = z
+  .object({
+    companyId: uuidSchema,
+    startsAt: z
+      .string()
+      .refine((v) => Number.isFinite(new Date(v).getTime())),
+    endsAt: z
+      .string()
+      .refine((v) => Number.isFinite(new Date(v).getTime())),
+    note: z.string().trim().max(200),
+  })
+  .refine((data) => {
+    const start = new Date(data.startsAt);
+    const end = new Date(data.endsAt);
+    return end > start && start > new Date();
+  });
 
 function parseCustomBookingFields(value: string): CustomBookingField[] | null {
   const labels = value
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map((line) => line.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim())
     .filter(Boolean);
   if (labels.length > 20 || labels.some((line) => line.length > 80)) return null;
 
@@ -87,35 +147,6 @@ function isValidTimeZone(value: string) {
   }
 }
 
-function isBusinessHourSchedule(value: unknown): value is BusinessHourEntry[] {
-  if (!Array.isArray(value) || value.length !== 7) return false;
-  const weekdays = new Set<number>();
-  const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
-
-  return value.every((entry: unknown) => {
-    if (!entry || typeof entry !== "object") return false;
-    const item = entry as Record<string, unknown>;
-    if (
-      typeof item.weekday !== "number" ||
-      !Number.isInteger(item.weekday) ||
-      item.weekday < 0 ||
-      item.weekday > 6 ||
-      weekdays.has(item.weekday) ||
-      typeof item.is_open !== "boolean" ||
-      typeof item.opens_at !== "string" ||
-      typeof item.closes_at !== "string" ||
-      !timePattern.test(item.opens_at) ||
-      !timePattern.test(item.closes_at) ||
-      (item.is_open && item.opens_at >= item.closes_at)
-    ) {
-      return false;
-    }
-
-    weekdays.add(item.weekday);
-    return true;
-  });
-}
-
 async function getSuperadminClients() {
   const supabase = await createSupabaseServerClient();
   const { data, error } = await supabase.auth.getUser();
@@ -124,55 +155,147 @@ async function getSuperadminClients() {
   const { data: isPlatformAdmin, error: roleError } =
     await supabase.rpc("is_platform_admin");
   if (roleError) {
-    throw new Error(`Platform-admin jogosultság ellenőrzése nem sikerült: ${roleError.message}`);
+    throw new Error(
+      `Platform-admin jogosultság ellenőrzése nem sikerült: ${roleError.message}`,
+    );
   }
   if (isPlatformAdmin !== true) return null;
 
   return { supabase, admin: createSupabaseAdminClient() };
 }
 
+interface TenantCompanyPermissions {
+  id: string;
+  owner_id: string;
+  can_edit_prices: boolean;
+  can_manage_services_advanced: boolean;
+}
+
+/**
+ * Explicitly verifies on the server that the authenticated user owns `companyId`
+ * (or is a platform admin) and checks required service-management permission flags
+ * to prevent IDOR and privilege escalation across tenants.
+ */
+async function verifyTenantCompanyAccess(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  companyId: string,
+  requirements?: {
+    requireAdvancedServices?: boolean;
+    requireEditPrices?: boolean;
+  },
+): Promise<{
+  ok: boolean;
+  error?: string;
+  company?: TenantCompanyPermissions;
+}> {
+  const { data: userData, error: authError } = await supabase.auth.getUser();
+  if (authError || !userData.user) {
+    return { ok: false, error: "A művelethez jelentkezz be újra." };
+  }
+
+  const { data: company, error: companyError } = await supabase
+    .from("companies")
+    .select("id, owner_id, can_edit_prices, can_manage_services_advanced")
+    .eq("id", companyId)
+    .maybeSingle();
+
+  if (companyError || !company) {
+    return {
+      ok: false,
+      error: "Nincs jogosultságod a kiválasztott szolgáltató módosításához.",
+    };
+  }
+
+  let isAdmin = false;
+  if (company.owner_id !== userData.user.id) {
+    const { data: adminFlag } = await supabase.rpc("is_platform_admin");
+    isAdmin = adminFlag === true;
+    if (!isAdmin) {
+      return {
+        ok: false,
+        error: "Nincs jogosultságod a kiválasztott szolgáltató módosításához.",
+      };
+    }
+  }
+
+  if (
+    !isAdmin &&
+    requirements?.requireAdvancedServices &&
+    !company.can_manage_services_advanced
+  ) {
+    return {
+      ok: false,
+      error: "Nincs jogosultságod a szolgáltatások bővített kezeléséhez.",
+    };
+  }
+
+  if (
+    !isAdmin &&
+    requirements?.requireEditPrices &&
+    !company.can_edit_prices
+  ) {
+    return {
+      ok: false,
+      error: "Nincs jogosultságod az árak és leírások módosításához.",
+    };
+  }
+
+  return { ok: true, company };
+}
+
 export async function createTenantAction(
   _previousState: SuperadminActionState,
   formData: FormData,
 ): Promise<SuperadminActionState> {
-  const name = String(formData.get("name") ?? "").trim();
-  const slug = String(formData.get("slug") ?? "").trim();
-  const ownerEmail = String(formData.get("ownerEmail") ?? "").trim().toLowerCase();
-  const primaryColor = String(formData.get("primaryColor") ?? "");
-  const plan = String(formData.get("plan") ?? "");
-  const openingTime = String(formData.get("openingTime") ?? "");
-  const closingTime = String(formData.get("closingTime") ?? "");
-  const timeZone = String(formData.get("timeZone") ?? "").trim();
-  const slotIntervalMinutes = Number(formData.get("slotIntervalMinutes"));
-  const canEditPrices = formData.get("canEditPrices") === "on";
-  const canManageServicesAdvanced =
-    formData.get("canManageServicesAdvanced") === "on";
+  const ownerEmail = String(formData.get("ownerEmail") ?? "")
+    .trim()
+    .toLowerCase();
   const customBookingFields = parseCustomBookingFields(
     String(formData.get("customBookingFields") ?? ""),
   );
+  const parsed = tenantBaseSchema.safeParse({
+    name: String(formData.get("name") ?? ""),
+    slug: String(formData.get("slug") ?? ""),
+    primaryColor: String(formData.get("primaryColor") ?? ""),
+    plan: String(formData.get("plan") ?? ""),
+    openingTime: String(formData.get("openingTime") ?? ""),
+    closingTime: String(formData.get("closingTime") ?? ""),
+    timeZone: String(formData.get("timeZone") ?? ""),
+    slotIntervalMinutes: Number(formData.get("slotIntervalMinutes")),
+    canEditPrices: formData.get("canEditPrices") === "on",
+    canManageServicesAdvanced:
+      formData.get("canManageServicesAdvanced") === "on",
+  });
 
   if (
-    !name ||
-    name.length > 100 ||
-    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) ||
+    !parsed.success ||
     !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ownerEmail) ||
     ownerEmail.length > 320 ||
-    !/^#[0-9a-fA-F]{6}$/.test(primaryColor) ||
-    !/^([01]\d|2[0-3]):[0-5]\d$/.test(openingTime) ||
-    !/^([01]\d|2[0-3]):[0-5]\d$/.test(closingTime) ||
-    openingTime >= closingTime ||
-    !isValidTimeZone(timeZone) ||
-    !Number.isInteger(slotIntervalMinutes) ||
-    slotIntervalMinutes < 5 ||
-    slotIntervalMinutes > 240 ||
-    !["free", "starter", "pro"].includes(plan) ||
     customBookingFields === null
   ) {
-    return { error: "Ellenőrizd a cég nevét, slugját, kapcsolattartó e-mail-címét és a kiválasztott csomagot." };
+    return {
+      error:
+        "Ellenőrizd a cég nevét, slugját, kapcsolattartó e-mail-címét és a kiválasztott csomagot.",
+    };
   }
 
+  const {
+    name,
+    slug,
+    primaryColor,
+    plan,
+    openingTime,
+    closingTime,
+    timeZone,
+    slotIntervalMinutes,
+    canEditPrices,
+    canManageServicesAdvanced,
+  } = parsed.data;
+
   const clients = await getSuperadminClients();
-  if (!clients) return { error: "A művelethez platform-admin jogosultság szükséges." };
+  if (!clients) {
+    return { error: "A művelethez platform-admin jogosultság szükséges." };
+  }
 
   const { data: existingCompany, error: slugError } = await clients.admin
     .from("companies")
@@ -180,9 +303,13 @@ export async function createTenantAction(
     .ilike("slug", slug)
     .maybeSingle();
   if (slugError) {
-    throw new Error(`A foglalóoldal címének ellenőrzése nem sikerült: ${slugError.message}`);
+    throw new Error(
+      `A foglalóoldal címének ellenőrzése nem sikerült: ${slugError.message}`,
+    );
   }
-  if (existingCompany) return { error: "Ez a foglalóoldal-cím már használatban van." };
+  if (existingCompany) {
+    return { error: "Ez a foglalóoldal-cím már használatban van." };
+  }
 
   let ownerId: string | null = null;
   for (let page = 1; !ownerId; page += 1) {
@@ -191,12 +318,14 @@ export async function createTenantAction(
       perPage: 1000,
     });
     if (error) {
-      throw new Error(`A tenant kapcsolattartójának keresése nem sikerült: ${error.message}`);
+      throw new Error(
+        `A tenant kapcsolattartójának keresése nem sikerült: ${error.message}`,
+      );
     }
 
-    ownerId = data.users.find(
-      (user) => user.email?.toLowerCase() === ownerEmail,
-    )?.id ?? null;
+    ownerId =
+      data.users.find((user) => user.email?.toLowerCase() === ownerEmail)?.id ??
+      null;
     if (ownerId || data.users.length < 1000) break;
   }
 
@@ -263,43 +392,46 @@ export async function updateTenantSettingsAction(
   _previousState: SuperadminActionState,
   formData: FormData,
 ): Promise<SuperadminActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
-  const name = String(formData.get("name") ?? "").trim();
-  const slug = String(formData.get("slug") ?? "").trim();
-  const primaryColor = String(formData.get("primaryColor") ?? "");
-  const plan = String(formData.get("plan") ?? "");
-  const openingTime = String(formData.get("openingTime") ?? "");
-  const closingTime = String(formData.get("closingTime") ?? "");
-  const timeZone = String(formData.get("timeZone") ?? "").trim();
-  const slotIntervalMinutes = Number(formData.get("slotIntervalMinutes"));
-  const canEditPrices = formData.get("canEditPrices") === "on";
-  const canManageServicesAdvanced =
-    formData.get("canManageServicesAdvanced") === "on";
+  const companyIdResult = uuidSchema.safeParse(formData.get("companyId"));
   const customBookingFields = parseCustomBookingFields(
     String(formData.get("customBookingFields") ?? ""),
   );
+  const parsed = tenantBaseSchema.safeParse({
+    name: String(formData.get("name") ?? ""),
+    slug: String(formData.get("slug") ?? ""),
+    primaryColor: String(formData.get("primaryColor") ?? ""),
+    plan: String(formData.get("plan") ?? ""),
+    openingTime: String(formData.get("openingTime") ?? ""),
+    closingTime: String(formData.get("closingTime") ?? ""),
+    timeZone: String(formData.get("timeZone") ?? ""),
+    slotIntervalMinutes: Number(formData.get("slotIntervalMinutes")),
+    canEditPrices: formData.get("canEditPrices") === "on",
+    canManageServicesAdvanced:
+      formData.get("canManageServicesAdvanced") === "on",
+  });
 
-  if (
-    !companyIdPattern.test(companyId) ||
-    !name ||
-    name.length > 100 ||
-    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) ||
-    !/^#[0-9a-fA-F]{6}$/.test(primaryColor) ||
-    !["free", "starter", "pro"].includes(plan) ||
-    !/^([01]\d|2[0-3]):[0-5]\d$/.test(openingTime) ||
-    !/^([01]\d|2[0-3]):[0-5]\d$/.test(closingTime) ||
-    openingTime >= closingTime ||
-    !isValidTimeZone(timeZone) ||
-    !Number.isInteger(slotIntervalMinutes) ||
-    slotIntervalMinutes < 5 ||
-    slotIntervalMinutes > 240 ||
-    customBookingFields === null
-  ) {
+  if (!companyIdResult.success || !parsed.success || customBookingFields === null) {
     return { error: "Ellenőrizd a szolgáltató adatait és a nyitvatartást." };
   }
 
+  const companyId = companyIdResult.data;
+  const {
+    name,
+    slug,
+    primaryColor,
+    plan,
+    openingTime,
+    closingTime,
+    timeZone,
+    slotIntervalMinutes,
+    canEditPrices,
+    canManageServicesAdvanced,
+  } = parsed.data;
+
   const clients = await getSuperadminClients();
-  if (!clients) return { error: "A művelethez platform-admin jogosultság szükséges." };
+  if (!clients) {
+    return { error: "A művelethez platform-admin jogosultság szükséges." };
+  }
 
   const { data: conflictingCompany, error: slugError } = await clients.admin
     .from("companies")
@@ -308,16 +440,23 @@ export async function updateTenantSettingsAction(
     .neq("id", companyId)
     .maybeSingle();
   if (slugError) {
-    throw new Error(`A foglalóoldal címének ellenőrzése nem sikerült: ${slugError.message}`);
+    throw new Error(
+      `A foglalóoldal címének ellenőrzése nem sikerült: ${slugError.message}`,
+    );
   }
-  if (conflictingCompany) return { error: "Ez a foglalóoldal-cím már használatban van." };
+  if (conflictingCompany) {
+    return { error: "Ez a foglalóoldal-cím már használatban van." };
+  }
 
-  const schedule: BusinessHourEntry[] = Array.from({ length: 7 }, (_, weekday) => ({
-    weekday,
-    is_open: weekday >= 1 && weekday <= 5,
-    opens_at: openingTime,
-    closes_at: closingTime,
-  }));
+  const schedule: BusinessHourEntry[] = Array.from(
+    { length: 7 },
+    (_, weekday) => ({
+      weekday,
+      is_open: weekday >= 1 && weekday <= 5,
+      opens_at: openingTime,
+      closes_at: closingTime,
+    }),
+  );
   const { error } = await clients.supabase.rpc(
     "update_platform_company_all_settings",
     {
@@ -338,7 +477,9 @@ export async function updateTenantSettingsAction(
     if (error.code === "23505") {
       return { error: "Ez a foglalóoldal-cím már használatban van." };
     }
-    throw new Error(`A szolgáltató adatainak módosítása nem sikerült: ${error.message}`);
+    throw new Error(
+      `A szolgáltató adatainak módosítása nem sikerült: ${error.message}`,
+    );
   }
 
   revalidatePath("/superadmin");
@@ -351,22 +492,33 @@ export async function updateTenantPlanAction(
   _previousState: SuperadminActionState,
   formData: FormData,
 ): Promise<SuperadminActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
-  const plan = String(formData.get("plan") ?? "");
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(companyId) ||
-    !["free", "starter", "pro"].includes(plan)
-  ) {
+  const parsed = z
+    .object({
+      companyId: uuidSchema,
+      plan: z.enum(["free", "starter", "pro"]),
+    })
+    .safeParse({
+      companyId: formData.get("companyId"),
+      plan: formData.get("plan"),
+    });
+
+  if (!parsed.success) {
     return { error: "A szolgáltató vagy csomag érvénytelen." };
   }
 
   const clients = await getSuperadminClients();
-  if (!clients) return { error: "A művelethez platform-admin jogosultság szükséges." };
+  if (!clients) {
+    return { error: "A művelethez platform-admin jogosultság szükséges." };
+  }
   const { error } = await clients.admin
     .from("companies")
-    .update({ plan: plan as CompanyPlan })
-    .eq("id", companyId);
-  if (error) throw new Error(`A szolgáltatói csomag módosítása nem sikerült: ${error.message}`);
+    .update({ plan: parsed.data.plan as CompanyPlan })
+    .eq("id", parsed.data.companyId);
+  if (error) {
+    throw new Error(
+      `A szolgáltatói csomag módosítása nem sikerült: ${error.message}`,
+    );
+  }
 
   revalidatePath("/superadmin");
   return { success: "A csomag frissült." };
@@ -376,23 +528,32 @@ export async function updateTenantStatusAction(
   _previousState: SuperadminActionState,
   formData: FormData,
 ): Promise<SuperadminActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
-  const status = String(formData.get("status") ?? "");
-  if (
-    !companyIdPattern.test(companyId) ||
-    !["pending", "active", "suspended"].includes(status)
-  ) {
+  const parsed = z
+    .object({
+      companyId: uuidSchema,
+      status: z.enum(["pending", "active", "suspended"]),
+    })
+    .safeParse({
+      companyId: formData.get("companyId"),
+      status: formData.get("status"),
+    });
+
+  if (!parsed.success) {
     return { error: "A szolgáltató vagy státusz érvénytelen." };
   }
 
   const clients = await getSuperadminClients();
-  if (!clients) return { error: "A művelethez platform-admin jogosultság szükséges." };
+  if (!clients) {
+    return { error: "A művelethez platform-admin jogosultság szükséges." };
+  }
   const { error } = await clients.supabase.rpc("set_company_status", {
-    p_company_id: companyId,
-    p_status: status,
+    p_company_id: parsed.data.companyId,
+    p_status: parsed.data.status,
   });
   if (error) {
-    throw new Error(`A szolgáltató státuszának módosítása nem sikerült: ${error.message}`);
+    throw new Error(
+      `A szolgáltató státuszának módosítása nem sikerült: ${error.message}`,
+    );
   }
 
   revalidatePath("/superadmin");
@@ -405,28 +566,25 @@ export async function createServiceAction(
   _previousState: SuperadminActionState,
   formData: FormData,
 ): Promise<SuperadminActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
-  const name = String(formData.get("name") ?? "").trim();
-  const duration = Number(formData.get("duration"));
-  const price = Number(formData.get("price"));
-  const description = String(formData.get("description") ?? "").trim();
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(companyId) ||
-    !name ||
-    name.length > 100 ||
-    !Number.isInteger(duration) ||
-    duration < 1 ||
-    duration > 1440 ||
-    !Number.isFinite(price) ||
-    price < 0 ||
-    price > 1_000_000_000 ||
-    description.length > 1000
-  ) {
+  const companyIdResult = uuidSchema.safeParse(formData.get("companyId"));
+  const serviceResult = serviceFieldsSchema.safeParse({
+    name: String(formData.get("name") ?? ""),
+    duration: Number(formData.get("duration")),
+    price: Number(formData.get("price")),
+    description: String(formData.get("description") ?? ""),
+  });
+
+  if (!companyIdResult.success || !serviceResult.success) {
     return { error: "Adj meg érvényes szolgáltatásnevet, időtartamot és árat." };
   }
 
+  const companyId = companyIdResult.data;
+  const { name, duration, price, description } = serviceResult.data;
+
   const clients = await getSuperadminClients();
-  if (!clients) return { error: "A művelethez platform-admin jogosultság szükséges." };
+  if (!clients) {
+    return { error: "A művelethez platform-admin jogosultság szükséges." };
+  }
 
   const { data: lastService, error: orderError } = await clients.admin
     .from("services")
@@ -436,7 +594,9 @@ export async function createServiceAction(
     .limit(1)
     .maybeSingle();
   if (orderError) {
-    throw new Error(`A szolgáltatások betöltése nem sikerült: ${orderError.message}`);
+    throw new Error(
+      `A szolgáltatások betöltése nem sikerült: ${orderError.message}`,
+    );
   }
 
   const { error } = await clients.admin.from("services").insert({
@@ -447,7 +607,9 @@ export async function createServiceAction(
     leiras: description,
     display_order: (lastService?.display_order ?? -1) + 1,
   });
-  if (error) throw new Error(`A szolgáltatás mentése nem sikerült: ${error.message}`);
+  if (error) {
+    throw new Error(`A szolgáltatás mentése nem sikerült: ${error.message}`);
+  }
 
   revalidatePath("/superadmin");
   revalidatePath("/", "layout");
@@ -458,23 +620,35 @@ export async function updatePlatformServiceAction(
   _previousState: SuperadminActionState,
   formData: FormData,
 ): Promise<SuperadminActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
-  const serviceId = String(formData.get("serviceId") ?? "");
-  const name = String(formData.get("name") ?? "").trim();
-  const duration = Number(formData.get("duration"));
-  const price = Number(formData.get("price"));
-  const description = String(formData.get("description") ?? "").trim();
-  if (
-    !companyIdPattern.test(companyId) ||
-    !companyIdPattern.test(serviceId) ||
-    !isValidServiceInput(name, duration, price) ||
-    description.length > 1000
-  ) {
-    return { error: "Ellenőrizd a szolgáltatás nevét, időtartamát, árát és leírását." };
+  const idsResult = z
+    .object({
+      companyId: uuidSchema,
+      serviceId: uuidSchema,
+    })
+    .safeParse({
+      companyId: formData.get("companyId"),
+      serviceId: formData.get("serviceId"),
+    });
+  const serviceResult = serviceFieldsSchema.safeParse({
+    name: String(formData.get("name") ?? ""),
+    duration: Number(formData.get("duration")),
+    price: Number(formData.get("price")),
+    description: String(formData.get("description") ?? ""),
+  });
+
+  if (!idsResult.success || !serviceResult.success) {
+    return {
+      error: "Ellenőrizd a szolgáltatás nevét, időtartamát, árát és leírását.",
+    };
   }
 
+  const { companyId, serviceId } = idsResult.data;
+  const { name, duration, price, description } = serviceResult.data;
+
   const clients = await getSuperadminClients();
-  if (!clients) return { error: "A művelethez platform-admin jogosultság szükséges." };
+  if (!clients) {
+    return { error: "A művelethez platform-admin jogosultság szükséges." };
+  }
   const { data, error } = await clients.admin
     .from("services")
     .update({
@@ -487,7 +661,9 @@ export async function updatePlatformServiceAction(
     .eq("cég_id", companyId)
     .select("id")
     .maybeSingle();
-  if (error) throw new Error(`A szolgáltatás mentése nem sikerült: ${error.message}`);
+  if (error) {
+    throw new Error(`A szolgáltatás mentése nem sikerült: ${error.message}`);
+  }
   if (!data) return { error: "A szolgáltatás nem található." };
 
   revalidatePath("/superadmin");
@@ -504,53 +680,69 @@ export async function setPlatformServiceActiveAction(
 ): Promise<SuperadminActionState> {
   void previousState;
   void _formData;
-  if (
-    !companyIdPattern.test(companyId) ||
-    !companyIdPattern.test(serviceId) ||
-    typeof isActive !== "boolean"
-  ) {
+  const parsed = z
+    .object({
+      companyId: uuidSchema,
+      serviceId: uuidSchema,
+      isActive: z.boolean(),
+    })
+    .safeParse({ companyId, serviceId, isActive });
+
+  if (!parsed.success) {
     return { error: "A szolgáltatás vagy szolgáltató azonosítója érvénytelen." };
   }
 
   const clients = await getSuperadminClients();
-  if (!clients) return { error: "A művelethez platform-admin jogosultság szükséges." };
+  if (!clients) {
+    return { error: "A művelethez platform-admin jogosultság szükséges." };
+  }
   const { data, error } = await clients.admin
     .from("services")
-    .update({ is_active: isActive })
-    .eq("id", serviceId)
-    .eq("cég_id", companyId)
+    .update({ is_active: parsed.data.isActive })
+    .eq("id", parsed.data.serviceId)
+    .eq("cég_id", parsed.data.companyId)
     .select("id")
     .maybeSingle();
-  if (error) throw new Error(`A szolgáltatás állapotának mentése nem sikerült: ${error.message}`);
+  if (error) {
+    throw new Error(
+      `A szolgáltatás állapotának mentése nem sikerült: ${error.message}`,
+    );
+  }
   if (!data) return { error: "A szolgáltatás nem található." };
 
   revalidatePath("/superadmin");
   revalidatePath("/", "layout");
-  return { success: isActive ? "A szolgáltatás újra aktív." : "A szolgáltatás elrejtve." };
+  return {
+    success: parsed.data.isActive
+      ? "A szolgáltatás újra aktív."
+      : "A szolgáltatás elrejtve.",
+  };
 }
 
 export async function reorderServicesAction(
   companyId: string,
   serviceIds: string[],
 ): Promise<SuperadminActionState> {
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(companyId) ||
-    !Array.isArray(serviceIds) ||
-    serviceIds.some(
-      (id) =>
-        typeof id !== "string" ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id),
-    ) ||
-    new Set(serviceIds).size !== serviceIds.length
-  ) {
+  const parsed = z
+    .object({
+      companyId: uuidSchema,
+      serviceIds: z
+        .array(uuidSchema)
+        .refine((ids) => new Set(ids).size === ids.length),
+    })
+    .safeParse({ companyId, serviceIds });
+
+  if (!parsed.success) {
     return { error: "A szolgáltatások sorrendje érvénytelen." };
   }
 
   const clients = await getSuperadminClients();
-  if (!clients) return { error: "A művelethez platform-admin jogosultság szükséges." };
+  if (!clients) {
+    return { error: "A művelethez platform-admin jogosultság szükséges." };
+  }
   const { error } = await clients.supabase.rpc("reorder_company_services", {
-    p_company_id: companyId,
-    p_service_ids: serviceIds,
+    p_company_id: parsed.data.companyId,
+    p_service_ids: parsed.data.serviceIds,
   });
   if (error) {
     return { error: `A sorrend mentése nem sikerült: ${error.message}` };
@@ -565,17 +757,27 @@ export async function signInAction(
   _previousState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const email = String(formData.get("email") ?? "").trim();
-  const password = String(formData.get("password") ?? "");
+  const parsed = signInSchema.safeParse({
+    email: String(formData.get("email") ?? ""),
+    password: String(formData.get("password") ?? ""),
+  });
 
-  if (!email.includes("@") || password.length < 8) {
-    return { error: "Adj meg érvényes e-mail-címet és legalább 8 karakteres jelszót." };
+  if (!parsed.success) {
+    return {
+      error:
+        "Adj meg érvényes e-mail-címet és legalább 8 karakteres jelszót.",
+    };
   }
 
   const supabase = await createSupabaseServerClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  const { error } = await supabase.auth.signInWithPassword({
+    email: parsed.data.email,
+    password: parsed.data.password,
+  });
 
-  if (error) return { error: "A bejelentkezés nem sikerült. Ellenőrizd az adatokat." };
+  if (error) {
+    return { error: "A bejelentkezés nem sikerült. Ellenőrizd az adatokat." };
+  }
 
   redirect("/dashboard");
 }
@@ -593,39 +795,42 @@ export async function createBlockoutAction(
   _previousState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
-  const start = String(formData.get("startsAt") ?? "");
-  const end = String(formData.get("endsAt") ?? "");
-  const note = String(formData.get("note") ?? "").trim();
-  const startDate = new Date(start);
-  const endDate = new Date(end);
+  const parsed = blockoutSchema.safeParse({
+    companyId: String(formData.get("companyId") ?? ""),
+    startsAt: String(formData.get("startsAt") ?? ""),
+    endsAt: String(formData.get("endsAt") ?? ""),
+    note: String(formData.get("note") ?? ""),
+  });
 
-  if (
-    !companyId ||
-    !Number.isFinite(startDate.getTime()) ||
-    !Number.isFinite(endDate.getTime()) ||
-    endDate <= startDate ||
-    startDate <= new Date() ||
-    note.length > 200
-  ) {
-    return { error: "Adj meg érvényes jövőbeli kezdő és végidőpontot, valamint legfeljebb 200 karakteres megjegyzést." };
+  if (!parsed.success) {
+    return {
+      error:
+        "Adj meg érvényes jövőbeli kezdő és végidőpontot, valamint legfeljebb 200 karakteres megjegyzést.",
+    };
   }
 
   const supabase = await createSupabaseServerClient();
-  const { data: userData, error: authError } = await supabase.auth.getUser();
-
-  if (authError || !userData.user) {
-    return { error: "A művelethez jelentkezz be újra." };
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+  );
+  if (!access.ok) {
+    return { error: access.error };
   }
 
+  const startDate = new Date(parsed.data.startsAt);
+  const endDate = new Date(parsed.data.endsAt);
+
   const { error } = await supabase.rpc("add_manual_blockout", {
-    p_company_id: companyId,
+    p_company_id: parsed.data.companyId,
     p_start: startDate.toISOString(),
     p_end: endDate.toISOString(),
-    p_note: note || null,
+    p_note: parsed.data.note || null,
   });
 
-  if (error) return { error: `A blokkolás mentése nem sikerült: ${error.message}` };
+  if (error) {
+    return { error: `A blokkolás mentése nem sikerült: ${error.message}` };
+  }
 
   revalidatePath("/dashboard");
   return { success: "A blokkolást elmentettük." };
@@ -635,29 +840,33 @@ export async function saveBusinessHoursAction(
   _previousState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
+  const companyIdResult = uuidSchema.safeParse(formData.get("companyId"));
   const scheduleText = String(formData.get("schedule") ?? "");
-  let schedule: unknown;
+  let rawSchedule: unknown;
 
   try {
-    schedule = JSON.parse(scheduleText);
+    rawSchedule = JSON.parse(scheduleText);
   } catch {
     return { error: "A nyitvatartás formátuma érvénytelen." };
   }
 
-  if (!companyIdPattern.test(companyId) || !isBusinessHourSchedule(schedule)) {
+  const scheduleResult = businessHourScheduleSchema.safeParse(rawSchedule);
+  if (!companyIdResult.success || !scheduleResult.success) {
     return { error: "Ellenőrizd a heti nyitvatartást." };
   }
 
   const supabase = await createSupabaseServerClient();
-  const { data: userData, error: authError } = await supabase.auth.getUser();
-  if (authError || !userData.user) {
-    return { error: "A művelethez jelentkezz be újra." };
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    companyIdResult.data,
+  );
+  if (!access.ok) {
+    return { error: access.error };
   }
 
   const { error } = await supabase.rpc("update_company_business_hours", {
-    p_company_id: companyId,
-    p_schedule: schedule,
+    p_company_id: companyIdResult.data,
+    p_schedule: scheduleResult.data,
   });
   if (error) {
     return { error: `A nyitvatartás mentése nem sikerült: ${error.message}` };
@@ -672,23 +881,27 @@ export async function createTenantServiceAction(
   _previousState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
-  const name = String(formData.get("name") ?? "").trim();
-  const duration = Number(formData.get("duration"));
-  const price = Number(formData.get("price"));
-  const description = String(formData.get("description") ?? "").trim();
-  if (
-    !companyIdPattern.test(companyId) ||
-    !isValidServiceInput(name, duration, price) ||
-    description.length > 1000
-  ) {
+  const companyIdResult = uuidSchema.safeParse(formData.get("companyId"));
+  const serviceResult = serviceFieldsSchema.safeParse({
+    name: String(formData.get("name") ?? ""),
+    duration: Number(formData.get("duration")),
+    price: Number(formData.get("price")),
+    description: String(formData.get("description") ?? ""),
+  });
+
+  if (!companyIdResult.success || !serviceResult.success) {
     return { error: "Adj meg érvényes szolgáltatásnevet, időtartamot és árat." };
   }
 
+  const companyId = companyIdResult.data;
+  const { name, duration, price, description } = serviceResult.data;
+
   const supabase = await createSupabaseServerClient();
-  const { data: userData, error: authError } = await supabase.auth.getUser();
-  if (authError || !userData.user) {
-    return { error: "A művelethez jelentkezz be újra." };
+  const access = await verifyTenantCompanyAccess(supabase, companyId, {
+    requireAdvancedServices: true,
+  });
+  if (!access.ok) {
+    return { error: access.error };
   }
 
   const { data: lastService, error: orderError } = await supabase
@@ -699,7 +912,9 @@ export async function createTenantServiceAction(
     .limit(1)
     .maybeSingle();
   if (orderError) {
-    return { error: `A szolgáltatások betöltése nem sikerült: ${orderError.message}` };
+    return {
+      error: `A szolgáltatások betöltése nem sikerült: ${orderError.message}`,
+    };
   }
 
   const { error } = await supabase.from("services").insert({
@@ -710,7 +925,9 @@ export async function createTenantServiceAction(
     leiras: description,
     display_order: (lastService?.display_order ?? -1) + 1,
   });
-  if (error) return { error: `A szolgáltatás mentése nem sikerült: ${error.message}` };
+  if (error) {
+    return { error: `A szolgáltatás mentése nem sikerült: ${error.message}` };
+  }
 
   revalidatePath("/dashboard");
   revalidatePath("/", "layout");
@@ -721,8 +938,23 @@ export async function updateTenantServiceAction(
   _previousState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
-  const serviceId = String(formData.get("serviceId") ?? "");
+  const idsResult = z
+    .object({
+      companyId: uuidSchema,
+      serviceId: uuidSchema,
+    })
+    .safeParse({
+      companyId: formData.get("companyId"),
+      serviceId: formData.get("serviceId"),
+    });
+
+  if (!idsResult.success) {
+    return {
+      error: "A szolgáltató vagy szolgáltatás azonosítója érvénytelen.",
+    };
+  }
+
+  const { companyId, serviceId } = idsResult.data;
   const name = String(formData.get("name") ?? "").trim();
   const durationValue = formData.get("duration");
   const priceValue = formData.get("price");
@@ -733,15 +965,20 @@ export async function updateTenantServiceAction(
     ar?: number;
     leiras?: string;
   } = {};
-  if (
-    !companyIdPattern.test(companyId) ||
-    !companyIdPattern.test(serviceId)
-  ) {
-    return { error: "A szolgáltató vagy szolgáltatás azonosítója érvénytelen." };
-  }
+
+  const wantsAdvancedEdit = formData.has("name") || formData.has("duration");
+  const wantsPriceOrDescEdit =
+    priceValue !== null || formData.has("description");
+
   if (formData.has("name")) {
     const duration = Number(durationValue);
-    if (!name || name.length > 100 || !Number.isInteger(duration) || duration < 1 || duration > 1440) {
+    if (
+      !name ||
+      name.length > 100 ||
+      !Number.isInteger(duration) ||
+      duration < 1 ||
+      duration > 1440
+    ) {
       return { error: "Adj meg érvényes szolgáltatásnevet és időtartamot." };
     }
     update.nev = name;
@@ -755,15 +992,22 @@ export async function updateTenantServiceAction(
     update.ar = price;
   }
   if (formData.has("description")) {
-    if (description.length > 1000) return { error: "A leírás legfeljebb 1000 karakter lehet." };
+    if (description.length > 1000) {
+      return { error: "A leírás legfeljebb 1000 karakter lehet." };
+    }
     update.leiras = description;
   }
-  if (!Object.keys(update).length) return { error: "Nincs mentendő módosítás." };
+  if (!Object.keys(update).length) {
+    return { error: "Nincs mentendő módosítás." };
+  }
 
   const supabase = await createSupabaseServerClient();
-  const { data: userData, error: authError } = await supabase.auth.getUser();
-  if (authError || !userData.user) {
-    return { error: "A művelethez jelentkezz be újra." };
+  const access = await verifyTenantCompanyAccess(supabase, companyId, {
+    requireAdvancedServices: wantsAdvancedEdit,
+    requireEditPrices: wantsPriceOrDescEdit,
+  });
+  if (!access.ok) {
+    return { error: access.error };
   }
 
   const { data, error } = await supabase
@@ -773,8 +1017,17 @@ export async function updateTenantServiceAction(
     .eq("cég_id", companyId)
     .select("id")
     .maybeSingle();
-  if (error) return { error: `A szolgáltatás módosítása nem sikerült: ${error.message}` };
-  if (!data) return { error: "A szolgáltatás nem található vagy nincs jogosultságod a módosításához." };
+  if (error) {
+    return {
+      error: `A szolgáltatás módosítása nem sikerült: ${error.message}`,
+    };
+  }
+  if (!data) {
+    return {
+      error:
+        "A szolgáltatás nem található vagy nincs jogosultságod a módosításához.",
+    };
+  }
 
   revalidatePath("/dashboard");
   revalidatePath("/", "layout");
@@ -785,16 +1038,29 @@ export async function deleteTenantServiceAction(
   _previousState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
-  const serviceId = String(formData.get("serviceId") ?? "");
-  if (!companyIdPattern.test(companyId) || !companyIdPattern.test(serviceId)) {
-    return { error: "A szolgáltató vagy szolgáltatás azonosítója érvénytelen." };
+  const idsResult = z
+    .object({
+      companyId: uuidSchema,
+      serviceId: uuidSchema,
+    })
+    .safeParse({
+      companyId: formData.get("companyId"),
+      serviceId: formData.get("serviceId"),
+    });
+
+  if (!idsResult.success) {
+    return {
+      error: "A szolgáltató vagy szolgáltatás azonosítója érvénytelen.",
+    };
   }
 
+  const { companyId, serviceId } = idsResult.data;
   const supabase = await createSupabaseServerClient();
-  const { data: userData, error: authError } = await supabase.auth.getUser();
-  if (authError || !userData.user) {
-    return { error: "A művelethez jelentkezz be újra." };
+  const access = await verifyTenantCompanyAccess(supabase, companyId, {
+    requireAdvancedServices: true,
+  });
+  if (!access.ok) {
+    return { error: access.error };
   }
 
   const { data, error } = await supabase
@@ -804,8 +1070,15 @@ export async function deleteTenantServiceAction(
     .eq("cég_id", companyId)
     .select("id")
     .maybeSingle();
-  if (error) return { error: `A szolgáltatás törlése nem sikerült: ${error.message}` };
-  if (!data) return { error: "A szolgáltatás nem található vagy nincs jogosultságod a törléséhez." };
+  if (error) {
+    return { error: `A szolgáltatás törlése nem sikerült: ${error.message}` };
+  }
+  if (!data) {
+    return {
+      error:
+        "A szolgáltatás nem található vagy nincs jogosultságod a törléséhez.",
+    };
+  }
 
   revalidatePath("/dashboard");
   revalidatePath("/", "layout");
@@ -816,16 +1089,29 @@ export async function restoreTenantServiceAction(
   _previousState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const companyId = String(formData.get("companyId") ?? "");
-  const serviceId = String(formData.get("serviceId") ?? "");
-  if (!companyIdPattern.test(companyId) || !companyIdPattern.test(serviceId)) {
-    return { error: "A szolgáltató vagy szolgáltatás azonosítója érvénytelen." };
+  const idsResult = z
+    .object({
+      companyId: uuidSchema,
+      serviceId: uuidSchema,
+    })
+    .safeParse({
+      companyId: formData.get("companyId"),
+      serviceId: formData.get("serviceId"),
+    });
+
+  if (!idsResult.success) {
+    return {
+      error: "A szolgáltató vagy szolgáltatás azonosítója érvénytelen.",
+    };
   }
 
+  const { companyId, serviceId } = idsResult.data;
   const supabase = await createSupabaseServerClient();
-  const { data: userData, error: authError } = await supabase.auth.getUser();
-  if (authError || !userData.user) {
-    return { error: "A művelethez jelentkezz be újra." };
+  const access = await verifyTenantCompanyAccess(supabase, companyId, {
+    requireAdvancedServices: true,
+  });
+  if (!access.ok) {
+    return { error: access.error };
   }
 
   const { data, error } = await supabase
@@ -835,8 +1121,17 @@ export async function restoreTenantServiceAction(
     .eq("cég_id", companyId)
     .select("id")
     .maybeSingle();
-  if (error) return { error: `A szolgáltatás visszaállítása nem sikerült: ${error.message}` };
-  if (!data) return { error: "A szolgáltatás nem található vagy nincs jogosultságod a visszaállításához." };
+  if (error) {
+    return {
+      error: `A szolgáltatás visszaállítása nem sikerült: ${error.message}`,
+    };
+  }
+  if (!data) {
+    return {
+      error:
+        "A szolgáltatás nem található vagy nincs jogosultságod a visszaállításához.",
+    };
+  }
 
   revalidatePath("/dashboard");
   revalidatePath("/", "layout");
@@ -844,17 +1139,19 @@ export async function restoreTenantServiceAction(
 }
 
 export async function deleteBlockoutAction(formData: FormData) {
-  const blockoutId = String(formData.get("blockoutId") ?? "");
-  if (!blockoutId) throw new Error("Hiányzik a blokkolás azonosítója.");
+  const parsed = uuidSchema.safeParse(formData.get("blockoutId"));
+  if (!parsed.success) throw new Error("Hiányzik a blokkolás azonosítója.");
 
   const supabase = await createSupabaseServerClient();
   const { data: userData, error: authError } = await supabase.auth.getUser();
   if (authError || !userData.user) redirect("/dashboard/login");
 
   const { error } = await supabase.rpc("delete_manual_blockout", {
-    p_blockout_id: blockoutId,
+    p_blockout_id: parsed.data,
   });
-  if (error) throw new Error(`A blokkolás törlése nem sikerült: ${error.message}`);
+  if (error) {
+    throw new Error(`A blokkolás törlése nem sikerült: ${error.message}`);
+  }
 
   revalidatePath("/dashboard");
 }

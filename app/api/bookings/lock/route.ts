@@ -1,85 +1,114 @@
+import {
+  buildCustomBookingFieldsSchema,
+  checkRateLimit,
+  countActiveClientLocks,
+  customBookingFieldDefinitionsListSchema,
+  extractClientIdentifier,
+  lockRequestSchema,
+  registerActiveClientLock,
+} from "@/lib/security";
 import { createSupabasePublicClient } from "@/lib/supabase/public";
 
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-interface LockRequest {
-  companyId?: unknown;
-  serviceIds?: unknown;
-  start?: unknown;
-  vehicleMake?: unknown;
-  vehicleModel?: unknown;
-  vehicleRegistration?: unknown;
-  customFields?: unknown;
-}
-
 export async function POST(request: Request) {
-  let body: LockRequest;
+  let rawBody: unknown;
   try {
-    body = (await request.json()) as LockRequest;
+    rawBody = await request.json();
   } catch {
-    return Response.json({ error: "A kérés törzse nem érvényes JSON." }, { status: 400 });
+    return Response.json(
+      { error: "A kérés törzse nem érvényes JSON." },
+      { status: 400 },
+    );
   }
 
-  if (
-    typeof body.companyId !== "string" ||
-    !uuidPattern.test(body.companyId) ||
-    !Array.isArray(body.serviceIds) ||
-    !body.serviceIds.length ||
-    body.serviceIds.some(
-      (serviceId) =>
-        typeof serviceId !== "string" || !uuidPattern.test(serviceId),
-    ) ||
-    new Set(body.serviceIds).size !== body.serviceIds.length ||
-    typeof body.start !== "string" ||
-    !Number.isFinite(new Date(body.start).getTime()) ||
-    (body.vehicleMake !== undefined &&
-      (typeof body.vehicleMake !== "string" || body.vehicleMake.length > 100)) ||
-    (body.vehicleModel !== undefined &&
-      (typeof body.vehicleModel !== "string" || body.vehicleModel.length > 100)) ||
-    (body.vehicleRegistration !== undefined &&
-      (typeof body.vehicleRegistration !== "string" ||
-        body.vehicleRegistration.length > 20)) ||
-    (body.customFields !== undefined &&
-      (!body.customFields ||
-        typeof body.customFields !== "object" ||
-        Array.isArray(body.customFields) ||
-        Object.keys(body.customFields).length > 20 ||
-        Object.entries(body.customFields).some(
-          ([key, value]) =>
-            !/^[a-z0-9_]{1,40}$/.test(key) ||
-            typeof value !== "string" ||
-            value.length > 500,
-        )))
-  ) {
-    return Response.json({ error: "Hiányos vagy hibás foglalási adatok." }, { status: 400 });
+  const parsed = lockRequestSchema.safeParse(rawBody);
+  if (!parsed.success) {
+    return Response.json(
+      { error: "Hiányos vagy hibás foglalási adatok." },
+      { status: 400 },
+    );
+  }
+
+  const body = parsed.data;
+  const clientId = extractClientIdentifier(request);
+  if (clientId) {
+    const rateLimit = checkRateLimit("booking_lock", clientId, 5, 10 * 60 * 1000);
+    if (!rateLimit.allowed) {
+      return Response.json(
+        {
+          error:
+            "Túl sok zárolási próbálkozás rövid időn belül. Kérlek, várj néhány percet.",
+        },
+        { status: 429 },
+      );
+    }
+
+    if (countActiveClientLocks(clientId) >= 3) {
+      return Response.json(
+        {
+          error:
+            "Egyszerre legfeljebb 3 aktív időpont-zárolásod lehet. Fejezd be a megkezdett foglalást, vagy várd meg a zárolás lejártát.",
+        },
+        { status: 429 },
+      );
+    }
   }
 
   const supabase = createSupabasePublicClient();
+  let validatedCustomFields: Record<string, string> = body.customFields ?? {};
+
+  if (typeof (supabase as { from?: unknown }).from === "function") {
+    const { data: companyData } = await supabase
+      .from("companies")
+      .select("custom_booking_fields")
+      .eq("id", body.companyId)
+      .maybeSingle();
+
+    if (companyData?.custom_booking_fields !== undefined) {
+      const definitionsResult =
+        customBookingFieldDefinitionsListSchema.safeParse(
+          companyData.custom_booking_fields,
+        );
+      if (!definitionsResult.success) {
+        return Response.json(
+          { error: "A szolgáltató egyedi mezői hibásan vannak konfigurálva." },
+          { status: 500 },
+        );
+      }
+
+      const dynamicSchema = buildCustomBookingFieldsSchema(
+        definitionsResult.data,
+      );
+      const customParse = dynamicSchema.safeParse(body.customFields ?? {});
+      if (!customParse.success) {
+        return Response.json(
+          { error: "Hiányos vagy hibás foglalási adatok." },
+          { status: 400 },
+        );
+      }
+      validatedCustomFields = customParse.data;
+    }
+  }
+
   const { data, error } = await supabase.rpc("create_booking_lock", {
     p_company_id: body.companyId,
     p_service_ids: body.serviceIds,
     p_start: new Date(body.start).toISOString(),
-    p_vehicle_make:
-      typeof body.vehicleMake === "string" ? body.vehicleMake : null,
-    p_vehicle_model:
-      typeof body.vehicleModel === "string" ? body.vehicleModel : null,
-    p_vehicle_registration:
-      typeof body.vehicleRegistration === "string"
-        ? body.vehicleRegistration
-        : null,
-    p_custom_fields:
-      body.customFields && typeof body.customFields === "object"
-        ? body.customFields
-        : {},
+    p_vehicle_make: body.vehicleMake || null,
+    p_vehicle_model: body.vehicleModel || null,
+    p_vehicle_registration: body.vehicleRegistration || null,
+    p_custom_fields: validatedCustomFields,
   });
 
   if (error) {
     console.error("Booking lock RPC failed", error);
     const conflict = error.message.includes("no longer available");
+    const rateLimited =
+      error.message.includes("Rate limit exceeded") ||
+      error.message.includes("Too many active booking locks");
     const missingMigration =
       error.code === "PGRST202" ||
       (error.code === "42883" && error.message.includes("create_booking_lock"));
+
     if (missingMigration) {
       return Response.json(
         {
@@ -89,6 +118,17 @@ export async function POST(request: Request) {
         { status: 503 },
       );
     }
+
+    if (rateLimited) {
+      return Response.json(
+        {
+          error:
+            "Túl sok aktív zárolás vagy próbálkozás. Kérlek, várj néhány percet.",
+        },
+        { status: 429 },
+      );
+    }
+
     return Response.json(
       {
         error: conflict
@@ -108,7 +148,14 @@ export async function POST(request: Request) {
   const lock = data?.[0];
   if (!lock) {
     console.error("Booking lock RPC returned no lock data");
-    return Response.json({ error: "A zárolás létrehozása nem sikerült." }, { status: 500 });
+    return Response.json(
+      { error: "A zárolás létrehozása nem sikerült." },
+      { status: 500 },
+    );
+  }
+
+  if (clientId) {
+    registerActiveClientLock(clientId, lock.lock_token, lock.locked_until);
   }
 
   return Response.json({

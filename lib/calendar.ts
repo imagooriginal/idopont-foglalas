@@ -10,10 +10,15 @@ function googleDate(date: Date) {
   return date.toISOString().replace(/[-:]|\.\d{3}/g, "");
 }
 
-function escapeIcsText(value: string) {
+export function sanitizeSingleLineText(value: string) {
+  return value.replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
+}
+
+export function escapeIcsText(value: string) {
   return value
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
     .replace(/\\/g, "\\\\")
-    .replace(/\r?\n/g, "\\n")
+    .replace(/\r\n|\r|\n/g, "\\n")
     .replace(/,/g, "\\,")
     .replace(/;/g, "\\;");
 }
@@ -39,28 +44,45 @@ function foldIcsLine(line: string) {
   return folded.join("\r\n");
 }
 
-function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (character) => {
-    const entities: Record<string, string> = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    };
-    return entities[character];
-  });
+export function escapeHtml(value: string) {
+  return value
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+    .replace(/[&<>"']/g, (character) => {
+      const entities: Record<string, string> = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      };
+      return entities[character];
+    });
+}
+
+function sanitizeSafeHttpsUrl(url: string) {
+  const cleaned = url.replace(/[\r\n\x00-\x1f\x7f]/g, "").trim();
+  try {
+    const parsed = new URL(cleaned);
+    if (parsed.protocol === "https:") {
+      return cleaned;
+    }
+  } catch {
+    // Fall through to safe default
+  }
+  return "https://calendar.google.com/calendar/render";
 }
 
 export function createGoogleCalendarUrl(event: CalendarEvent) {
   const params = new URLSearchParams({
     action: "TEMPLATE",
-    text: event.title,
-    details: event.description,
+    text: sanitizeSingleLineText(event.title),
+    details: event.description.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ""),
     dates: `${googleDate(event.start)}/${googleDate(event.end)}`,
   });
 
-  if (event.location) params.set("location", event.location);
+  if (event.location) {
+    params.set("location", sanitizeSingleLineText(event.location));
+  }
 
   return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
@@ -74,16 +96,16 @@ export function createIcsCalendarFile(event: CalendarEvent) {
     "CALSCALE:GREGORIAN",
     "METHOD:PUBLISH",
     "BEGIN:VEVENT",
-    `UID:${uid}`,
+    `UID:${escapeIcsText(uid)}`,
     `DTSTAMP:${googleDate(new Date())}`,
     `DTSTART:${googleDate(event.start)}`,
     `DTEND:${googleDate(event.end)}`,
-    `SUMMARY:${escapeIcsText(event.title)}`,
+    `SUMMARY:${escapeIcsText(sanitizeSingleLineText(event.title))}`,
     `DESCRIPTION:${escapeIcsText(event.description)}`,
   ];
 
   if (event.location) {
-    lines.push(`LOCATION:${escapeIcsText(event.location)}`);
+    lines.push(`LOCATION:${escapeIcsText(sanitizeSingleLineText(event.location))}`);
   }
 
   lines.push("END:VEVENT", "END:VCALENDAR");
@@ -98,6 +120,7 @@ export function createBookingEmailHtml({
   start,
   end,
   googleCalendarUrl,
+  extraFields = [],
 }: {
   greeting: string;
   companyName: string;
@@ -106,13 +129,18 @@ export function createBookingEmailHtml({
   start: string;
   end: string;
   googleCalendarUrl: string;
+  extraFields?: Array<[string, string]>;
 }) {
-  const rows = [
-    ["Szolgáltató", companyName],
-    ["Szolgáltatás", serviceName],
-    ["Ügyfél", customerName],
-    ["Kezdés", start],
-    ["Befejezés", end],
+  const rows: Array<[string, string]> = [
+    ["Szolgáltató", sanitizeSingleLineText(companyName)],
+    ["Szolgáltatás", sanitizeSingleLineText(serviceName)],
+    ["Ügyfél", sanitizeSingleLineText(customerName)],
+    ["Kezdés", sanitizeSingleLineText(start)],
+    ["Befejezés", sanitizeSingleLineText(end)],
+    ...extraFields.map(([label, value]): [string, string] => [
+      sanitizeSingleLineText(label),
+      sanitizeSingleLineText(value),
+    ]),
   ];
   const details = rows
     .map(
@@ -120,6 +148,7 @@ export function createBookingEmailHtml({
         `<tr><th align="left" style="padding:8px 12px">${escapeHtml(label)}</th><td style="padding:8px 12px">${escapeHtml(value)}</td></tr>`,
     )
     .join("");
+  const safeUrl = sanitizeSafeHttpsUrl(googleCalendarUrl);
 
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033"><h1 style="font-size:22px">${escapeHtml(greeting)}</h1><p>A foglalás részletei:</p><table style="border-collapse:collapse;width:100%">${details}</table><p style="margin-top:24px"><a href="${escapeHtml(googleCalendarUrl)}" style="display:inline-block;padding:12px 18px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:6px">Hozzáadás a Google Naptárhoz</a></p><p style="font-size:13px;color:#526078">A naptármeghívó ICS-fájlként is csatolva van ehhez az e-mailhez.</p></div>`;
+  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033"><h1 style="font-size:22px">${escapeHtml(sanitizeSingleLineText(greeting))}</h1><p>A foglalás részletei:</p><table style="border-collapse:collapse;width:100%">${details}</table><p style="margin-top:24px"><a href="${escapeHtml(safeUrl)}" style="display:inline-block;padding:12px 18px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:6px">Hozzáadás a Google Naptárhoz</a></p><p style="font-size:13px;color:#526078">A naptármeghívó ICS-fájlként is csatolva van ehhez az e-mailhez.</p></div>`;
 }
