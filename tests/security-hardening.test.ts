@@ -20,6 +20,8 @@ const serverSupabaseMock = vi.hoisted(() => ({
   auth: {
     getUser: vi.fn(),
     signInWithOtp: vi.fn(),
+    signInWithPassword: vi.fn(),
+    signOut: vi.fn(),
   },
   rpc: vi.fn(),
   from: vi.fn(),
@@ -51,6 +53,7 @@ import {
   createTenantServiceAction,
   deleteTenantServiceAction,
   saveBusinessHoursAction,
+  signInAction,
   updateTenantPlanAction,
   updateTenantServiceAction,
 } from "../app/dashboard/actions";
@@ -70,6 +73,8 @@ describe("comprehensive security hardening", () => {
     publicSupabaseMock.from.mockReset();
     serverSupabaseMock.auth.getUser.mockReset();
     serverSupabaseMock.auth.signInWithOtp.mockReset();
+    serverSupabaseMock.auth.signInWithPassword.mockReset();
+    serverSupabaseMock.auth.signOut.mockReset();
     serverSupabaseMock.rpc.mockReset();
     serverSupabaseMock.from.mockReset();
     adminClientFactoryMock.mockReset();
@@ -100,13 +105,14 @@ describe("comprehensive security hardening", () => {
         }),
       });
 
-      const makeLockRequest = () =>
+      const makeLockRequest = (spoofedSession: string) =>
         lockPost(
           new Request("http://localhost/api/bookings/lock", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
               "x-forwarded-for": "203.0.113.10",
+              "x-booking-session": spoofedSession,
             },
             body: JSON.stringify({
               companyId: companyA,
@@ -116,15 +122,43 @@ describe("comprehensive security hardening", () => {
           }),
         );
 
-      expect((await makeLockRequest()).status).toBe(200);
-      expect((await makeLockRequest()).status).toBe(200);
-      expect((await makeLockRequest()).status).toBe(200);
+      expect((await makeLockRequest("session-1")).status).toBe(200);
+      expect((await makeLockRequest("session-2")).status).toBe(200);
+      expect((await makeLockRequest("session-3")).status).toBe(200);
 
-      const fourthAttempt = await makeLockRequest();
+      const fourthAttempt = await makeLockRequest("session-4");
       expect(fourthAttempt.status).toBe(429);
       expect(await fourthAttempt.json()).toMatchObject({
         error: expect.stringContaining("legfeljebb 3 aktív"),
       });
+    });
+
+    it("rate-limits password login attempts (signInAction) per email address", async () => {
+      serverSupabaseMock.auth.signInWithPassword.mockResolvedValue({
+        error: { message: "Invalid login credentials" },
+      });
+
+      const makeLoginForm = () => {
+        const form = new FormData();
+        form.set("email", "admin@example.com");
+        form.set("password", "wrong-password-123");
+        return form;
+      };
+
+      for (let i = 0; i < 5; i += 1) {
+        const res = await signInAction({}, makeLoginForm());
+        expect(res.error).toBe(
+          "A bejelentkezés nem sikerült. Ellenőrizd az adatokat.",
+        );
+      }
+
+      const sixthAttempt = await signInAction({}, makeLoginForm());
+      expect(sixthAttempt.error).toContain(
+        "Túl sok bejelentkezési próbálkozás",
+      );
+      expect(serverSupabaseMock.auth.signInWithPassword).toHaveBeenCalledTimes(
+        5,
+      );
     });
 
     it("rate-limits OTP requests per IP and per email and requires an active lock", async () => {
@@ -185,11 +219,19 @@ describe("comprehensive security hardening", () => {
         }).success,
       ).toBe(false);
 
-      expect(
-        schema.safeParse({
-          rendszam: "   ",
-        }).success,
-      ).toBe(false);
+      const whitespaceOnlyResult = schema.safeParse({
+        rendszam: "   ",
+      });
+      expect(whitespaceOnlyResult).toMatchObject({
+        success: false,
+        error: {
+          issues: [
+            expect.objectContaining({
+              message: "A mező kitöltése kötelező",
+            }),
+          ],
+        },
+      });
 
       expect(
         schema.safeParse({
@@ -406,9 +448,12 @@ describe("comprehensive security hardening", () => {
       expect(headerMap["Permissions-Policy"]).toBe(
         "camera=(), microphone=(), geolocation=()",
       );
+      expect(headerMap["Content-Security-Policy"]).toContain(
+        "frame-ancestors 'none'",
+      );
     });
 
-    it("enforces SET search_path = public, pg_temp and revokes anon access to bookings in the consolidated SQL migration", () => {
+    it("enforces SET search_path = public, pg_temp, revokes anon access to bookings, and restricts companies RLS in the consolidated SQL migration", () => {
       const sql = readFileSync(
         resolve(
           process.cwd(),
@@ -425,6 +470,13 @@ describe("comprehensive security hardening", () => {
       expect(sql).toContain(
         "revoke all on public.bookings, public.booking_services, public.manual_blockouts",
       );
+      expect(sql).toContain(
+        'drop policy if exists "Public can read active companies" on public.companies;',
+      );
+      expect(sql).toContain(
+        'create policy "Owners and admins can read their companies"',
+      );
+      expect(sql).toContain("anon-direct-rpc");
       expect(sql).toContain("get diagnostics v_row_count = row_count;");
     });
   });

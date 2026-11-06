@@ -275,7 +275,59 @@ revoke all on public.bookings, public.booking_services, public.manual_blockouts
 -- Ensure authenticated users cannot insert/update/delete companies directly (managed via superadmin / RPCs)
 drop policy if exists "Owners can create pending companies" on public.companies;
 drop policy if exists "Owners can update their companies" on public.companies;
+drop policy if exists "Public can read active companies" on public.companies;
+drop policy if exists "Anon can read active companies" on public.companies;
+drop policy if exists "Owners and admins can read their companies" on public.companies;
 revoke insert, update, delete on public.companies from anon, authenticated;
+revoke select on public.companies from public, anon, authenticated;
+
+-- Anon role can only SELECT public non-sensitive columns on active companies
+grant select (
+  id,
+  nev,
+  slug,
+  nyitvatartas_kezdet,
+  nyitvatartas_vege,
+  time_zone,
+  slot_interval_minutes,
+  primary_color,
+  custom_booking_fields
+) on public.companies to anon;
+
+-- Authenticated role can SELECT company columns, but RLS strictly restricts rows to owner_id = auth.uid() or platform admins
+grant select (
+  id,
+  owner_id,
+  nev,
+  slug,
+  nyitvatartas_kezdet,
+  nyitvatartas_vege,
+  status,
+  time_zone,
+  slot_interval_minutes,
+  primary_color,
+  plan,
+  subscription_started_at,
+  can_manage_services,
+  can_edit_prices,
+  can_manage_services_advanced,
+  custom_booking_fields
+) on public.companies to authenticated;
+
+create policy "Anon can read active companies"
+  on public.companies
+  for select
+  to anon
+  using (status = 'active');
+
+create policy "Owners and admins can read their companies"
+  on public.companies
+  for select
+  to authenticated
+  using (
+    owner_id = (select auth.uid())
+    or (select public.is_platform_admin())
+  );
 
 -- Public safe company lookup RPC (never exposes owner_id, plan, or internal permission flags)
 create or replace function public.get_public_company_by_slug(p_slug text)
@@ -566,9 +618,37 @@ begin
     raise exception 'A valid time, at least one service, and booking fields are required.';
   end if;
 
-  if v_fingerprint is not null then
-    perform public.enforce_rate_limit('booking_lock', v_fingerprint, 5, 600);
+  if v_fingerprint is null then
+    v_fingerprint := md5(
+      coalesce(
+        nullif(
+          trim(
+            split_part(
+              coalesce(
+                (coalesce(nullif(current_setting('request.headers', true), ''), '{}')::jsonb ->> 'x-forwarded-for'),
+                ''
+              ),
+              ',',
+              1
+            )
+          ),
+          ''
+        ),
+        nullif(
+          trim(
+            coalesce(
+              (coalesce(nullif(current_setting('request.headers', true), ''), '{}')::jsonb ->> 'x-real-ip'),
+              ''
+            )
+          ),
+          ''
+        ),
+        coalesce((select auth.uid())::text, 'anon-direct-rpc')
+      )
+    );
   end if;
+
+  perform public.enforce_rate_limit('booking_lock', v_fingerprint, 5, 600);
 
   select c.* into v_company
   from public.companies c
@@ -636,17 +716,15 @@ begin
   where b.status = 'pending'
     and (b.locked_until is null or b.locked_until <= v_now);
 
-  if v_fingerprint is not null then
-    select count(*)::integer
-      into v_active_client_locks
-    from public.bookings b
-    where b.status = 'pending'
-      and b.locked_until > v_now
-      and b.lock_client_fingerprint = v_fingerprint;
+  select count(*)::integer
+    into v_active_client_locks
+  from public.bookings b
+  where b.status = 'pending'
+    and b.locked_until > v_now
+    and b.lock_client_fingerprint = v_fingerprint;
 
-    if v_active_client_locks >= 3 then
-      raise exception 'Too many active booking locks.';
-    end if;
+  if v_active_client_locks >= 3 then
+    raise exception 'Too many active booking locks.';
   end if;
 
   select coalesce(sum(s.idotartam_percben), 0)::integer,

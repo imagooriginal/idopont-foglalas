@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useState } from "react";
+import { useLanguage } from "@/lib/i18n";
 import {
   createBlockoutAction,
   deleteBlockoutAction,
@@ -91,6 +92,7 @@ export default function BlockoutManager({
     createBlockoutAction,
     initialState,
   );
+  const { t } = useLanguage();
 
   return (
     <section
@@ -116,11 +118,13 @@ export default function BlockoutManager({
           </span>
           <div>
             <h2 className="text-lg font-bold text-slate-950">
-              Ideiglenes zárvatartások
+              {t("Ideiglenes zárvatartások", "Temporary Time-offs")}
             </h2>
           <p className="mt-1 text-sm text-slate-600">
-            Szabadságot, ünnepnapot vagy más zárvatartást rögzíthetsz; az érintett
-            időpontok nem lesznek foglalhatók.
+            {t(
+              "Szabadságot, ünnepnapot vagy más zárvatartást rögzíthetsz; az érintett időpontok nem lesznek foglalhatók.",
+              "Schedule vacations, holidays, or breaks; affected time slots will not be bookable.",
+            )}
           </p>
           </div>
         </div>
@@ -130,7 +134,7 @@ export default function BlockoutManager({
           type="button"
         >
           <span aria-hidden="true" className="text-lg leading-none">+</span>
-          Zárvatartás hozzáadása
+          {t("Zárvatartás hozzáadása", "Add Time-off")}
         </button>
       </div>
 
@@ -152,10 +156,13 @@ export default function BlockoutManager({
             </svg>
           </span>
           <p className="mt-3 text-sm font-semibold text-slate-800">
-            Nincs közelgő zárvatartás
+            {t("Nincs közelgő zárvatartás", "No upcoming time-offs")}
           </p>
           <p className="mt-1 text-xs leading-5 text-slate-500">
-            A             A szabadságokat és ünnepnapokat itt rögzítheted.
+            {t(
+              "A szabadságokat és ünnepnapokat itt rögzítheted.",
+              "You can record vacations and holidays here.",
+            )}
           </p>
         </div>
       ) : (

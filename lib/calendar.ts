@@ -121,6 +121,7 @@ export function createBookingEmailHtml({
   end,
   googleCalendarUrl,
   extraFields = [],
+  introText = "A foglalás részletei:",
 }: {
   greeting: string;
   companyName: string;
@@ -130,6 +131,7 @@ export function createBookingEmailHtml({
   end: string;
   googleCalendarUrl: string;
   extraFields?: Array<[string, string]>;
+  introText?: string;
 }) {
   const rows: Array<[string, string]> = [
     ["Szolgáltató", sanitizeSingleLineText(companyName)],
@@ -149,6 +151,24 @@ export function createBookingEmailHtml({
     )
     .join("");
   const safeUrl = sanitizeSafeHttpsUrl(googleCalendarUrl);
+  const safeIntro = escapeHtml(sanitizeSingleLineText(introText));
 
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033"><h1 style="font-size:22px">${escapeHtml(sanitizeSingleLineText(greeting))}</h1><p>A foglalás részletei:</p><table style="border-collapse:collapse;width:100%">${details}</table><p style="margin-top:24px"><a href="${escapeHtml(safeUrl)}" style="display:inline-block;padding:12px 18px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:6px">Hozzáadás a Google Naptárhoz</a></p><p style="font-size:13px;color:#526078">A naptármeghívó ICS-fájlként is csatolva van ehhez az e-mailhez.</p></div>`;
+  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033"><h1 style="font-size:22px">${escapeHtml(sanitizeSingleLineText(greeting))}</h1><p>${safeIntro}</p><table style="border-collapse:collapse;width:100%">${details}</table><p style="margin-top:24px"><a href="${escapeHtml(safeUrl)}" style="display:inline-block;padding:12px 18px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:6px">Hozzáadás a Google Naptárhoz</a></p><p style="font-size:13px;color:#526078">A naptármeghívó ICS-fájlként is csatolva van ehhez az e-mailhez.</p></div>`;
+}
+
+export function createReminderEmailHtml(params: {
+  greeting: string;
+  companyName: string;
+  serviceName: string;
+  customerName: string;
+  start: string;
+  end: string;
+  googleCalendarUrl: string;
+  extraFields?: Array<[string, string]>;
+}) {
+  return createBookingEmailHtml({
+    ...params,
+    introText:
+      "Emlékeztetünk, hogy 24 órán belül esedékes a lefoglalt időpontod. A foglalás részletei:",
+  });
 }

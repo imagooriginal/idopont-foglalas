@@ -42,7 +42,8 @@ export default async function SuperadminPage({
 
   const companies = (companyData ?? []) as SuperadminCompany[];
   const users = [];
-  for (let page = 1; ; page += 1) {
+  const MAX_USER_PAGES = 10;
+  for (let page = 1; page <= MAX_USER_PAGES; page += 1) {
     const { data, error } = await admin.auth.admin.listUsers({
       page,
       perPage: 1000,
@@ -57,6 +58,29 @@ export default async function SuperadminPage({
   const ownerEmails = new Map(
     users.map((user) => [user.id, user.email ?? "Nincs e-mail-cím"]),
   );
+  const missingOwnerIds = Array.from(
+    new Set(
+      companies
+        .map((company) => company.owner_id)
+        .filter((ownerId) => Boolean(ownerId) && !ownerEmails.has(ownerId)),
+    ),
+  );
+  if (
+    missingOwnerIds.length > 0 &&
+    typeof admin.auth.admin.getUserById === "function"
+  ) {
+    const missingOwners = await Promise.all(
+      missingOwnerIds.map((ownerId) => admin.auth.admin.getUserById(ownerId)),
+    );
+    for (const result of missingOwners) {
+      if (result.data?.user) {
+        ownerEmails.set(
+          result.data.user.id,
+          result.data.user.email ?? "Nincs e-mail-cím",
+        );
+      }
+    }
+  }
   const { company: requestedCompanyId } = await searchParams;
   const selectedCompany =
     companies.find((company) => company.id === requestedCompanyId) ??

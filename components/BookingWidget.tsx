@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
+import { useLanguage } from "@/lib/i18n";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 interface Service {
@@ -130,6 +132,7 @@ export default function BookingWidget({
   const [emailWarning, setEmailWarning] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const { t } = useLanguage();
 
   const selectedServiceIds = selectedServices.map((service) => service.id);
   const totalServiceDuration = selectedServices.reduce(
@@ -388,11 +391,14 @@ export default function BookingWidget({
       className="mx-auto w-full max-w-6xl rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-900/5 sm:p-8"
       style={{ "--brand-color": primaryColor } as React.CSSProperties}
     >
-      <header className="mb-7 border-b border-slate-100 pb-5">
-        <p className="text-sm font-semibold uppercase tracking-wide text-[var(--brand-color)]">
-          Online időpontfoglalás
-        </p>
-        <h1 className="mt-1 text-2xl font-bold text-slate-950">{companyName}</h1>
+      <header className="mb-7 flex flex-wrap items-start justify-between gap-4 border-b border-slate-100 pb-5">
+        <div>
+          <p className="text-sm font-semibold uppercase tracking-wide text-[var(--brand-color)]">
+            {t("Online időpontfoglalás", "Online Appointment Booking")}
+          </p>
+          <h1 className="mt-1 text-2xl font-bold text-slate-950">{companyName}</h1>
+        </div>
+        <LanguageSwitcher />
       </header>
 
       {error && (
@@ -404,10 +410,14 @@ export default function BookingWidget({
       {step === 1 && (
         <div className="space-y-6">
           <div>
-            <h2 className="text-xl font-bold">1. Szolgáltatások és adatok</h2>
+            <h2 className="text-xl font-bold">
+              {t("1. Szolgáltatások és adatok", "1. Services & Details")}
+            </h2>
             <p className="mt-1 text-sm text-slate-600">
-              Válassz egy vagy több szolgáltatást
-              {customBookingFields.length ? ", és töltsd ki a kért adatokat." : "."}
+              {t("Válassz egy vagy több szolgáltatást", "Select one or more services")}
+              {customBookingFields.length
+                ? t(", és töltsd ki a kért adatokat.", " and fill in the requested details.")
+                : "."}
             </p>
           </div>
           {customBookingFields.length > 0 && (
@@ -422,7 +432,7 @@ export default function BookingWidget({
                   <input
                     autoComplete="off"
                     className="w-full rounded-lg border border-slate-300 px-3 py-2.5"
-                    maxLength={500}
+                    maxLength={200}
                     onChange={(event) =>
                       setBookingFields((current) => ({
                         ...current,
@@ -444,7 +454,7 @@ export default function BookingWidget({
                 className="text-sm font-semibold text-slate-800"
                 id="service-selection-label"
               >
-                Szolgáltatások
+                {t("Szolgáltatások", "Services")}
               </h3>
               <div
                 aria-labelledby="service-selection-label"
@@ -502,13 +512,16 @@ export default function BookingWidget({
             </div>
             {services.length === 0 && (
               <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
-                Jelenleg nincs foglalható szolgáltatás.
+                {t(
+                  "Jelenleg nincs foglalható szolgáltatás.",
+                  "No bookable services are currently available.",
+                )}
               </p>
             )}
             {selectedServices.length > 0 && (
               <div className="rounded-xl border border-slate-200 p-4">
                 <h3 className="font-semibold text-slate-900">
-                  Kiválasztott szolgáltatások
+                  {t("Kiválasztott szolgáltatások", "Selected Services")}
                 </h3>
                 <ul className="mt-2 divide-y divide-slate-100">
                   {selectedServices.map((service) => (
@@ -518,7 +531,7 @@ export default function BookingWidget({
                     >
                       <span className="text-sm text-slate-700">
                         {service.nev} · {Number(service.ar).toLocaleString("hu-HU")} Ft ·{" "}
-                        {service.idotartam_percben} perc
+                        {service.idotartam_percben} {t("perc", "min")}
                       </span>
                       <button
                         aria-label={`${service.nev} eltávolítása`}
@@ -530,14 +543,14 @@ export default function BookingWidget({
                         }
                         type="button"
                       >
-                        Eltávolítás
+                        {t("Eltávolítás", "Remove")}
                       </button>
                     </li>
                   ))}
                 </ul>
                 <p className="mt-3 border-t border-slate-100 pt-3 text-sm font-semibold text-slate-900">
-                  Összesen: {totalServicePrice.toLocaleString("hu-HU")} Ft ·{" "}
-                  {totalServiceDuration} perc
+                  {t("Összesen", "Total")}: {totalServicePrice.toLocaleString("hu-HU")} Ft ·{" "}
+                  {totalServiceDuration} {t("perc", "min")}
                 </p>
               </div>
             )}
@@ -550,7 +563,7 @@ export default function BookingWidget({
             onClick={() => setStep(2)}
             type="button"
           >
-            Tovább az időpontokhoz
+            {t("Tovább az időpontokhoz", "Continue to Time Slots")}
           </button>
         </div>
       )}
@@ -562,19 +575,24 @@ export default function BookingWidget({
             onClick={() => setStep(1)}
             type="button"
           >
-            ← Vissza
+            {t("← Vissza", "← Back")}
           </button>
-          <h2 className="text-xl font-bold">2. Válassz időpontot</h2>
+          <h2 className="text-xl font-bold">
+            {t("2. Válassz időpontot", "2. Select a Time Slot")}
+          </h2>
           <p className="mt-1 text-sm text-slate-600">
             {selectedServices.map((service) => service.nev).join(" + ")} ·{" "}
-            {totalServiceDuration} perc összesen
+            {totalServiceDuration} {t("perc összesen", "min total")}
           </p>
           <p className="mt-1 text-sm text-slate-600">
-            A kezdési időpontok {slotIntervalMinutes} perces rácsban érhetők el.
+            {t(
+              `A kezdési időpontok ${slotIntervalMinutes} perces rácsban érhetők el.`,
+              `Start times are available in ${slotIntervalMinutes}-minute intervals.`,
+            )}
           </p>
           <div className="mt-5 flex items-center justify-between gap-3">
             <button
-              aria-label="Előző hónap"
+              aria-label={t("Előző hónap", "Previous month")}
               className="rounded-lg border border-slate-300 px-3 py-2 font-medium text-slate-700 hover:bg-slate-50"
               onClick={() => {
                 const nextMonth = shiftMonth(monthStart, -1);
@@ -584,13 +602,13 @@ export default function BookingWidget({
               }}
               type="button"
             >
-              ← Előző hónap
+              {t("← Előző hónap", "← Previous month")}
             </button>
             <p aria-live="polite" className="text-center text-sm font-semibold text-slate-800">
               {monthLabel}
             </p>
             <button
-              aria-label="Következő hónap"
+              aria-label={t("Következő hónap", "Next month")}
               className="rounded-lg border border-slate-300 px-3 py-2 font-medium text-slate-700 hover:bg-slate-50"
               onClick={() => {
                 const nextMonth = shiftMonth(monthStart, 1);
@@ -600,19 +618,29 @@ export default function BookingWidget({
               }}
               type="button"
             >
-              Következő hónap →
+              {t("Következő hónap →", "Next month →")}
             </button>
           </div>
           {loadingSlots ? (
-            <p className="mt-6 text-sm text-slate-600">Időpontok betöltése...</p>
+            <p className="mt-6 text-sm text-slate-600">
+              {t("Időpontok betöltése...", "Loading time slots...")}
+            </p>
           ) : (
             <div className="mt-5 grid items-start gap-5 md:grid-cols-[minmax(17rem,0.8fr)_minmax(0,1.8fr)]">
               <div
-                aria-label="Havi naptár – nap kiválasztása"
+                aria-label={t("Havi naptár – nap kiválasztása", "Monthly calendar – select a day")}
                 className="rounded-xl border border-slate-200 bg-slate-50 p-3"
               >
                 <div className="mb-2 grid grid-cols-7 text-center text-xs font-semibold uppercase text-slate-500">
-                  {["H", "K", "Sze", "Cs", "P", "Szo", "V"].map((day, index) => (
+                  {[
+                    t("H", "M"),
+                    t("K", "Tu"),
+                    t("Sze", "W"),
+                    t("Cs", "Th"),
+                    t("P", "F"),
+                    t("Szo", "Sa"),
+                    t("V", "Su"),
+                  ].map((day, index) => (
                     <span key={`${day}-${index}`}>{day}</span>
                   ))}
                 </div>
@@ -741,9 +769,14 @@ export default function BookingWidget({
         <div>
           <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-xl font-bold">3. Személyes adatok</h2>
+              <h2 className="text-xl font-bold">
+                {t("3. Személyes adatok", "3. Personal Details")}
+              </h2>
               <p className="mt-1 text-sm text-slate-600">
-                Az időpontot öt percig fenntartjuk.
+                {t(
+                  "Az időpontot öt percig fenntartjuk.",
+                  "Your selected slot is reserved for 5 minutes.",
+                )}
               </p>
             </div>
             <span
@@ -755,7 +788,7 @@ export default function BookingWidget({
           </div>
           <form className="space-y-4" onSubmit={handleConfirmBooking}>
             <label className="block space-y-1.5 text-sm font-medium">
-              Név
+              {t("Név", "Name")}
               <input
                 autoComplete="name"
                 className="w-full rounded-lg border border-slate-300 px-3 py-2.5"
@@ -768,7 +801,7 @@ export default function BookingWidget({
               />
             </label>
             <label className="block space-y-1.5 text-sm font-medium">
-              E-mail-cím
+              {t("E-mail-cím", "Email address")}
               <input
                 autoComplete="email"
                 className="w-full rounded-lg border border-slate-300 px-3 py-2.5"
@@ -785,7 +818,7 @@ export default function BookingWidget({
               />
             </label>
             <label className="block space-y-1.5 text-sm font-medium">
-              Telefonszám
+              {t("Telefonszám", "Phone number")}
               <input
                 autoComplete="tel"
                 className="w-full rounded-lg border border-slate-300 px-3 py-2.5"
@@ -890,10 +923,13 @@ export default function BookingWidget({
             ✓
           </p>
           <h2 className="mt-4 text-2xl font-bold text-slate-950">
-            Sikeres foglalás!
+            {t("Sikeres foglalás!", "Booking Confirmed!")}
           </h2>
           <p className="mt-2 text-slate-600">
-            A foglalásod bekerült a {companyName} rendszerébe.
+            {t(
+              `A foglalásod bekerült a ${companyName} rendszerébe.`,
+              `Your booking has been registered with ${companyName}.`,
+            )}
           </p>
           {emailWarning && (
             <p className="mx-auto mt-5 max-w-lg rounded-lg bg-amber-50 p-4 text-left text-sm text-amber-900">
@@ -905,7 +941,7 @@ export default function BookingWidget({
             onClick={reset}
             type="button"
           >
-            Új foglalás indítása
+            {t("Új foglalás indítása", "Start New Booking")}
           </button>
         </div>
       )}

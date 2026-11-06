@@ -27,8 +27,12 @@ export const customBookingFieldDefinitionsListSchema = z
     "A dinamikus mezőkulcsoknak egyedinek kell lenniük.",
   );
 
+function stripControlCharacters(value: string) {
+  return value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+}
+
 function sanitizeFieldString(value: string) {
-  return value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim();
+  return stripControlCharacters(value).trim();
 }
 
 export const genericCustomFieldsSchema = z
@@ -36,10 +40,12 @@ export const genericCustomFieldsSchema = z
     z.string().regex(/^[a-z0-9_]{1,40}$/),
     z
       .string()
-      .transform(sanitizeFieldString)
-      .refine((val) => val.length <= 200, {
-        message: "Egy dinamikus mező értéke legfeljebb 200 karakter lehet.",
-      }),
+      .transform(stripControlCharacters)
+      .pipe(
+        z.string().trim().max(200, {
+          message: "Egy dinamikus mező értéke legfeljebb 200 karakter lehet.",
+        }),
+      ),
   )
   .refine((obj) => Object.keys(obj).length <= 20, {
     message: "Legfeljebb 20 egyedi mező adható meg.",
@@ -61,15 +67,20 @@ export function buildCustomBookingFieldsSchema(
   for (const field of validDefinitions) {
     const baseString = z
       .string()
-      .transform(sanitizeFieldString)
-      .refine((val) => val.length <= 200, {
-        message: `A(z) "${field.label}" mező legfeljebb 200 karakter lehet.`,
-      });
+      .transform(stripControlCharacters)
+      .pipe(
+        z.string().trim().max(200, {
+          message: `A(z) "${field.label}" mező legfeljebb 200 karakter lehet.`,
+        }),
+      );
 
     if (field.required) {
-      shape[field.key] = baseString.refine((val) => val.length > 0, {
-        message: `A(z) "${field.label}" mező kitöltése kötelező.`,
-      });
+      shape[field.key] = z
+        .string()
+        .transform(stripControlCharacters)
+        .pipe(z.string().trim().min(1, "A mező kitöltése kötelező").max(200, {
+          message: `A(z) "${field.label}" mező legfeljebb 200 karakter lehet.`,
+        }));
     } else {
       shape[field.key] = baseString.optional();
     }
@@ -190,15 +201,13 @@ export function hashIdentifier(value: string) {
 export function extractClientIdentifier(request: Request): string | null {
   const forwardedFor = request.headers.get("x-forwarded-for");
   const realIp = request.headers.get("x-real-ip");
-  const sessionCookie = request.headers.get("x-booking-session");
   const ip = forwardedFor?.split(",")[0]?.trim() || realIp?.trim() || "";
-  const session = sessionCookie?.trim() || "";
 
-  if (!ip && !session) {
+  if (!ip) {
     return null;
   }
 
-  return hashIdentifier(`${ip}:${session}`);
+  return hashIdentifier(ip);
 }
 
 interface RateLimitEntry {
@@ -210,8 +219,43 @@ interface ActiveLockEntry {
   expiresAt: number;
 }
 
+const MAX_SECURITY_STORE_ENTRIES = 5000;
 const rateLimitStore = new Map<string, RateLimitEntry>();
 const activeLocksByClient = new Map<string, ActiveLockEntry[]>();
+
+function pruneRateLimitStore(cutoff: number) {
+  if (rateLimitStore.size < MAX_SECURITY_STORE_ENTRIES) return;
+  for (const [key, entry] of rateLimitStore.entries()) {
+    const active = entry.timestamps.filter((ts) => ts > cutoff);
+    if (active.length === 0) {
+      rateLimitStore.delete(key);
+    } else {
+      rateLimitStore.set(key, { timestamps: active });
+    }
+  }
+  while (rateLimitStore.size >= MAX_SECURITY_STORE_ENTRIES) {
+    const oldestKey = rateLimitStore.keys().next().value;
+    if (!oldestKey) break;
+    rateLimitStore.delete(oldestKey);
+  }
+}
+
+function pruneActiveLocksStore(now: number) {
+  if (activeLocksByClient.size < MAX_SECURITY_STORE_ENTRIES) return;
+  for (const [key, entries] of activeLocksByClient.entries()) {
+    const active = entries.filter((entry) => entry.expiresAt > now);
+    if (active.length === 0) {
+      activeLocksByClient.delete(key);
+    } else {
+      activeLocksByClient.set(key, active);
+    }
+  }
+  while (activeLocksByClient.size >= MAX_SECURITY_STORE_ENTRIES) {
+    const oldestKey = activeLocksByClient.keys().next().value;
+    if (!oldestKey) break;
+    activeLocksByClient.delete(oldestKey);
+  }
+}
 
 export function resetSecurityStateForTests() {
   rateLimitStore.clear();
@@ -227,6 +271,7 @@ export function checkRateLimit(
 ): { allowed: boolean; remaining: number } {
   const key = `${scope}:${identifierHash}`;
   const cutoff = now - windowMs;
+  pruneRateLimitStore(cutoff);
   const existing = rateLimitStore.get(key)?.timestamps ?? [];
   const recent = existing.filter((timestamp) => timestamp > cutoff);
 
@@ -247,7 +292,11 @@ export function countActiveClientLocks(
   const existing = activeLocksByClient.get(clientFingerprint) ?? [];
   const active = existing.filter((entry) => entry.expiresAt > now);
   if (active.length !== existing.length) {
-    activeLocksByClient.set(clientFingerprint, active);
+    if (active.length === 0) {
+      activeLocksByClient.delete(clientFingerprint);
+    } else {
+      activeLocksByClient.set(clientFingerprint, active);
+    }
   }
   return active.length;
 }
@@ -258,6 +307,7 @@ export function registerActiveClientLock(
   lockedUntilIso: string,
   now = Date.now(),
 ) {
+  pruneActiveLocksStore(now);
   const expiresAt = new Date(lockedUntilIso).getTime();
   const validExpiry = Number.isFinite(expiresAt) ? expiresAt : now + 5 * 60 * 1000;
   const existing = (activeLocksByClient.get(clientFingerprint) ?? []).filter(

@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const supabase = vi.hoisted(() => ({ rpc: vi.fn() }));
+const supabase = vi.hoisted(() => ({
+  from: undefined as (() => unknown) | undefined,
+  rpc: vi.fn(),
+}));
 
 vi.mock("../lib/supabase/public", () => ({
   createSupabasePublicClient: () => supabase,
@@ -21,6 +24,7 @@ function request(body: unknown) {
 
 describe("booking lock route", () => {
   beforeEach(() => {
+    supabase.from = undefined;
     supabase.rpc.mockResolvedValue({
       data: [
         {
@@ -86,6 +90,26 @@ describe("booking lock route", () => {
   });
 
   it("accepts dynamic fields without requiring vehicle-specific inputs", async () => {
+    supabase.from = vi.fn().mockReturnValue({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data: {
+              custom_booking_fields: [
+                {
+                  key: "rendszam",
+                  label: "Rendszám",
+                  type: "text",
+                  required: true,
+                },
+              ],
+            },
+            error: null,
+          }),
+        }),
+      }),
+    });
+
     const response = await POST(
       request({
         companyId,
@@ -105,6 +129,41 @@ describe("booking lock route", () => {
         p_custom_fields: { rendszam: "ABC123" },
       }),
     );
+  });
+
+  it("rejects whitespace-only required dynamic fields before creating a lock", async () => {
+    supabase.rpc.mockClear();
+    supabase.from = vi.fn().mockReturnValue({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data: {
+              custom_booking_fields: [
+                {
+                  key: "rendszam",
+                  label: "Rendszám",
+                  type: "text",
+                  required: true,
+                },
+              ],
+            },
+            error: null,
+          }),
+        }),
+      }),
+    });
+
+    const response = await POST(
+      request({
+        companyId,
+        serviceIds: [serviceId],
+        start: "2030-01-15T10:00:00Z",
+        customFields: { rendszam: "   " },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
   it("reports unavailable times as a conflict", async () => {

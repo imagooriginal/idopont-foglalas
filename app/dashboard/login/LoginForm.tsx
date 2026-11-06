@@ -1,12 +1,14 @@
 "use client";
 
 import { useActionState } from "react";
+import { useLanguage } from "@/lib/i18n";
 import { signInAction, type ActionState } from "../actions";
 
 const initialState: ActionState = {};
 
 export default function LoginForm() {
   const [state, action, pending] = useActionState(signInAction, initialState);
+  const { t } = useLanguage();
 
   return (
     <form action={action} className="space-y-5">
@@ -16,7 +18,7 @@ export default function LoginForm() {
         </p>
       )}
       <label className="block space-y-2 text-sm font-medium text-slate-700">
-        E-mail-cím
+        {t("E-mail-cím", "Email address")}
         <input
           required
           autoComplete="email"
@@ -26,7 +28,7 @@ export default function LoginForm() {
         />
       </label>
       <label className="block space-y-2 text-sm font-medium text-slate-700">
-        Jelszó
+        {t("Jelszó", "Password")}
         <input
           required
           autoComplete="current-password"
@@ -41,7 +43,9 @@ export default function LoginForm() {
         disabled={pending}
         type="submit"
       >
-        {pending ? "Bejelentkezés..." : "Bejelentkezés"}
+        {pending
+          ? t("Bejelentkezés...", "Signing in...")
+          : t("Bejelentkezés", "Sign in")}
       </button>
     </form>
   );

@@ -20,6 +20,8 @@ import { CSS } from "@dnd-kit/utilities";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useActionState, useState, useTransition } from "react";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
+import { useLanguage } from "@/lib/i18n";
 import {
   createServiceAction,
   createTenantAction,
@@ -940,6 +942,7 @@ export default function SuperadminConsole({
   totalAuthUsers: number;
 }) {
   const router = useRouter();
+  const { t } = useLanguage();
   const selectedCompany = companies.find(
     (company) => company.id === selectedCompanyId,
   );
@@ -955,21 +958,27 @@ export default function SuperadminConsole({
         <header className="flex flex-col gap-4 border-b border-slate-200 pb-6 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="text-sm font-semibold uppercase tracking-[0.12em] text-blue-700">
-              Platform admin
+              {t("Platform admin", "Platform Admin")}
             </p>
             <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl">
-              SaaS áttekintő
+              {t("SaaS áttekintő", "SaaS Overview")}
             </h1>
             <p className="mt-2 text-sm text-slate-500">
-              Tenantok, felhasználók és szolgáltatáscsomagok kezelése.
+              {t(
+                "Tenantok, felhasználók és szolgáltatáscsomagok kezelése.",
+                "Manage tenants, users, and subscription plans.",
+              )}
             </p>
           </div>
-          <Link
-            className="w-fit rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
-            href="/dashboard"
-          >
-            Szolgáltatói dashboard
-          </Link>
+          <div className="flex flex-wrap items-center gap-3">
+            <LanguageSwitcher />
+            <Link
+              className="w-fit rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+              href="/dashboard"
+            >
+              {t("Szolgáltatói dashboard", "Provider Dashboard")}
+            </Link>
+          </div>
         </header>
 
         <section

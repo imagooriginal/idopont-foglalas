@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
-import { uuidSchema } from "@/lib/security";
+import { checkRateLimit, hashIdentifier, uuidSchema } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -135,6 +135,21 @@ function parseCustomBookingFields(value: string): CustomBookingField[] | null {
     fields.push({ key, label, type: "text", required });
   }
   return fields;
+}
+
+function sanitizeDatabaseError(
+  fallbackPrefix: string,
+  error: { message?: string; code?: string } | null | undefined,
+): string {
+  console.error(fallbackPrefix, error);
+  const message = error?.message ?? "";
+  if (message.includes("conflicts with an active booking")) {
+    return `${fallbackPrefix}: Az időszak ütközik egy aktív foglalással.`;
+  }
+  if (message.includes("At least one valid opening day is required")) {
+    return `${fallbackPrefix}: Legalább egy nyitvatartási nap megadása kötelező.`;
+  }
+  return `${fallbackPrefix}. Kérlek, próbáld újra.`;
 }
 
 function isValidTimeZone(value: string) {
@@ -312,7 +327,8 @@ export async function createTenantAction(
   }
 
   let ownerId: string | null = null;
-  for (let page = 1; !ownerId; page += 1) {
+  const MAX_USER_PAGES = 10;
+  for (let page = 1; !ownerId && page <= MAX_USER_PAGES; page += 1) {
     const { data, error } = await clients.admin.auth.admin.listUsers({
       page,
       perPage: 1000,
@@ -769,6 +785,15 @@ export async function signInAction(
     };
   }
 
+  const emailHash = hashIdentifier(parsed.data.email.toLowerCase());
+  const rateLimit = checkRateLimit("login_email", emailHash, 5, 10 * 60 * 1000);
+  if (!rateLimit.allowed) {
+    return {
+      error:
+        "Túl sok bejelentkezési próbálkozás. Kérlek, próbáld újra néhány perc múlva.",
+    };
+  }
+
   const supabase = await createSupabaseServerClient();
   const { error } = await supabase.auth.signInWithPassword({
     email: parsed.data.email,
@@ -829,7 +854,9 @@ export async function createBlockoutAction(
   });
 
   if (error) {
-    return { error: `A blokkolás mentése nem sikerült: ${error.message}` };
+    return {
+      error: sanitizeDatabaseError("A blokkolás mentése nem sikerült", error),
+    };
   }
 
   revalidatePath("/dashboard");
@@ -869,7 +896,12 @@ export async function saveBusinessHoursAction(
     p_schedule: scheduleResult.data,
   });
   if (error) {
-    return { error: `A nyitvatartás mentése nem sikerült: ${error.message}` };
+    return {
+      error: sanitizeDatabaseError(
+        "A nyitvatartás mentése nem sikerült",
+        error,
+      ),
+    };
   }
 
   revalidatePath("/dashboard");
@@ -913,7 +945,10 @@ export async function createTenantServiceAction(
     .maybeSingle();
   if (orderError) {
     return {
-      error: `A szolgáltatások betöltése nem sikerült: ${orderError.message}`,
+      error: sanitizeDatabaseError(
+        "A szolgáltatások betöltése nem sikerült",
+        orderError,
+      ),
     };
   }
 
@@ -926,7 +961,12 @@ export async function createTenantServiceAction(
     display_order: (lastService?.display_order ?? -1) + 1,
   });
   if (error) {
-    return { error: `A szolgáltatás mentése nem sikerült: ${error.message}` };
+    return {
+      error: sanitizeDatabaseError(
+        "A szolgáltatás mentése nem sikerült",
+        error,
+      ),
+    };
   }
 
   revalidatePath("/dashboard");
@@ -1019,7 +1059,10 @@ export async function updateTenantServiceAction(
     .maybeSingle();
   if (error) {
     return {
-      error: `A szolgáltatás módosítása nem sikerült: ${error.message}`,
+      error: sanitizeDatabaseError(
+        "A szolgáltatás módosítása nem sikerült",
+        error,
+      ),
     };
   }
   if (!data) {
@@ -1071,7 +1114,12 @@ export async function deleteTenantServiceAction(
     .select("id")
     .maybeSingle();
   if (error) {
-    return { error: `A szolgáltatás törlése nem sikerült: ${error.message}` };
+    return {
+      error: sanitizeDatabaseError(
+        "A szolgáltatás törlése nem sikerült",
+        error,
+      ),
+    };
   }
   if (!data) {
     return {
@@ -1123,7 +1171,10 @@ export async function restoreTenantServiceAction(
     .maybeSingle();
   if (error) {
     return {
-      error: `A szolgáltatás visszaállítása nem sikerült: ${error.message}`,
+      error: sanitizeDatabaseError(
+        "A szolgáltatás visszaállítása nem sikerült",
+        error,
+      ),
     };
   }
   if (!data) {

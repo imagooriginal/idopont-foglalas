@@ -5,6 +5,7 @@ import { signOutAction } from "./actions";
 import BlockoutManager from "./BlockoutManager";
 import BusinessHoursManager from "./BusinessHoursManager";
 import TenantServiceManager from "./TenantServiceManager";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 import { getSupabasePublicConfig } from "@/lib/supabase/config";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -156,15 +157,18 @@ function DashboardShell({
               {email}
             </p>
           </div>
-          <form action={signOutAction}>
-            <button
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950"
-              type="submit"
-            >
-              <DashboardIcon className="size-4" name="logout" />
-              <span className="hidden sm:inline">Kijelentkezés</span>
-            </button>
-          </form>
+          <div className="flex items-center gap-2">
+            <LanguageSwitcher />
+            <form action={signOutAction}>
+              <button
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950"
+                type="submit"
+              >
+                <DashboardIcon className="size-4" name="logout" />
+                <span className="hidden sm:inline">Kijelentkezés</span>
+              </button>
+            </form>
+          </div>
         </header>
         <main className="mx-auto min-h-[calc(100vh-4rem)] max-w-7xl px-4 py-6 pb-28 sm:px-6 sm:py-8 md:pb-10 lg:px-8">
           {children}
