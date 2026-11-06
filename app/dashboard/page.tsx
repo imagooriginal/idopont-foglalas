@@ -4,6 +4,13 @@ import { connection } from "next/server";
 import { signOutAction } from "./actions";
 import BlockoutManager from "./BlockoutManager";
 import BusinessHoursManager from "./BusinessHoursManager";
+import ManualBookingManager from "./ManualBookingManager";
+import PremiumFeaturesSection, {
+  type BlacklistEntryItem,
+  type CustomerHistorySummary,
+  type CustomerNoteItem,
+  type MonthlyPremiumStats,
+} from "./PremiumFeaturesSection";
 import TenantServiceManager from "./TenantServiceManager";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import { getSupabasePublicConfig } from "@/lib/supabase/config";
@@ -316,7 +323,7 @@ export default async function DashboardPage({
   const { data: companies, error: companiesError } = await supabase
     .from("companies")
     .select(
-      "id, nev, slug, status, time_zone, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, nyitvatartas_kezdet, nyitvatartas_vege",
+      "id, nev, slug, status, plan, time_zone, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, nyitvatartas_kezdet, nyitvatartas_vege",
     )
     .eq("owner_id", userData.user.id);
 
@@ -442,6 +449,10 @@ export default async function DashboardPage({
     serviceNamesByBooking.set(item.booking_id, names);
   }
   const timeZone = company.time_zone || "Europe/Budapest";
+  const companyPlan = company.plan === "pro" ? "pro" : "starter";
+  const canEditPrices = company.can_edit_prices !== false;
+  const canManageServicesAdvanced =
+    company.can_manage_services_advanced !== false;
   const bookings = bookingsResult.data ?? [];
   const blockouts = blockoutsResult.data ?? [];
   const today = getLocalDateKey(new Date(), timeZone);
@@ -453,6 +464,119 @@ export default async function DashboardPage({
     const bookingDay = getLocalDateKey(new Date(booking.kezdes_ideje), timeZone);
     return bookingDay >= today && bookingDay <= lastDayOfWeek;
   }).length;
+
+  const servicePrices = new Map(
+    (servicesResult.data ?? []).map((service) => [
+      service.id,
+      Number(service.ar) || 0,
+    ]),
+  );
+
+  let monthlyStats: MonthlyPremiumStats = {
+    confirmedCount: 0,
+    expectedRevenueFt: 0,
+    cancelledOrNoShowCount: 0,
+    topServiceName: null,
+  };
+  let notesList: CustomerNoteItem[] = [];
+  let blacklistEntries: BlacklistEntryItem[] = [];
+  let customerHistory: CustomerHistorySummary[] = [];
+
+  if (companyPlan === "pro") {
+    const monthStartIso = `${today.slice(0, 7)}-01T00:00:00.000Z`;
+    const [monthlyBookingsRes, notesRes, blacklistRes] = await Promise.all([
+      supabase
+        .from("bookings")
+        .select(
+          "id, service_id, status, ugyfel_nev, ugyfel_email, ugyfel_telefon, kezdes_ideje",
+        )
+        .eq("cég_id", company.id)
+        .gte("kezdes_ideje", monthStartIso)
+        .in("status", ["confirmed", "cancelled", "no_show"])
+        .order("kezdes_ideje", { ascending: false })
+        .limit(300),
+      supabase
+        .from("customer_notes")
+        .select(
+          "id, customer_key, customer_name, customer_email, customer_phone, private_note, updated_at",
+        )
+        .eq("company_id", company.id)
+        .order("updated_at", { ascending: false })
+        .limit(100),
+      supabase
+        .from("company_blacklist")
+        .select("id, email, phone, reason, created_at")
+        .eq("company_id", company.id)
+        .order("created_at", { ascending: false })
+        .limit(100),
+    ]);
+
+    const monthlyBookings = monthlyBookingsRes.data ?? [];
+    notesList = (notesRes.data ?? []) as CustomerNoteItem[];
+    blacklistEntries = (blacklistRes.data ?? []) as BlacklistEntryItem[];
+
+    const serviceCountMap = new Map<string, number>();
+    let confirmedCount = 0;
+    let expectedRevenueFt = 0;
+    let cancelledOrNoShowCount = 0;
+
+    for (const mb of monthlyBookings) {
+      if (mb.status === "confirmed") {
+        confirmedCount += 1;
+        expectedRevenueFt += servicePrices.get(mb.service_id) ?? 0;
+        const sName = serviceNames.get(mb.service_id);
+        if (sName) {
+          serviceCountMap.set(sName, (serviceCountMap.get(sName) ?? 0) + 1);
+        }
+      } else if (mb.status === "cancelled" || mb.status === "no_show") {
+        cancelledOrNoShowCount += 1;
+      }
+    }
+
+    let topServiceName: string | null = null;
+    let topServiceCount = 0;
+    for (const [sName, count] of serviceCountMap.entries()) {
+      if (count > topServiceCount) {
+        topServiceCount = count;
+        topServiceName = sName;
+      }
+    }
+
+    monthlyStats = {
+      confirmedCount,
+      expectedRevenueFt,
+      cancelledOrNoShowCount,
+      topServiceName,
+    };
+
+    const noteByKey = new Map(
+      notesList.map((note) => [note.customer_key, note.private_note]),
+    );
+    const historyMap = new Map<string, CustomerHistorySummary>();
+    for (const mb of monthlyBookings) {
+      const emailKey = (mb.ugyfel_email ?? "").trim().toLowerCase();
+      const phoneKey = (mb.ugyfel_telefon ?? "").replace(/[^0-9+]/g, "");
+      const customerKey = emailKey || phoneKey;
+      if (!customerKey) continue;
+
+      const existing = historyMap.get(customerKey);
+      if (existing) {
+        existing.bookingsCount += 1;
+      } else {
+        historyMap.set(customerKey, {
+          customerKey,
+          customerName: mb.ugyfel_nev ?? "Ügyfél",
+          customerEmail: mb.ugyfel_email ?? "",
+          customerPhone: mb.ugyfel_telefon ?? "",
+          bookingsCount: 1,
+          lastBookingAt: mb.kezdes_ideje,
+          privateNote: noteByKey.get(customerKey) ?? "",
+        });
+      }
+    }
+    customerHistory = Array.from(historyMap.values());
+  }
+
   const companyStatusLabel =
     company.status === "active"
       ? "Aktív szolgáltató"
@@ -474,9 +598,7 @@ export default async function DashboardPage({
 
   return (
     <DashboardShell
-      canManageServices={
-        company.can_edit_prices || company.can_manage_services_advanced
-      }
+      canManageServices={canEditPrices || canManageServicesAdvanced}
       email={userData.user.email ?? ""}
     >
       <div className="space-y-8">
@@ -497,6 +619,17 @@ export default async function DashboardPage({
               >
                 <span className={`size-1.5 rounded-full ${companyStatusDotColor}`} />
                 {companyStatusLabel}
+              </span>
+              <span
+                className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold ring-1 ${
+                  companyPlan === "pro"
+                    ? "bg-violet-50 text-violet-800 ring-violet-200"
+                    : "bg-slate-100 text-slate-700 ring-slate-200"
+                }`}
+              >
+                {companyPlan === "pro"
+                  ? "Prémium (Pro) csomag"
+                  : "Alap (Starter) csomag"}
               </span>
             </div>
             <p className="mt-2 text-sm text-slate-500">
@@ -717,20 +850,42 @@ export default async function DashboardPage({
             timeZone={timeZone}
           />
         </div>
+        <ManualBookingManager
+          companyId={company.id}
+          services={servicesResult.data ?? []}
+          timeZone={timeZone}
+        />
         <BusinessHoursManager
           companyId={company.id}
           hours={businessHoursResult.data ?? []}
           key={company.id}
         />
-        {(company.can_edit_prices || company.can_manage_services_advanced) && (
+        {(canEditPrices || canManageServicesAdvanced) && (
           <TenantServiceManager
             companyId={company.id}
-            canEditPrices={company.can_edit_prices}
-            canManageServicesAdvanced={company.can_manage_services_advanced}
+            canEditPrices={canEditPrices}
+            canManageServicesAdvanced={canManageServicesAdvanced}
             services={servicesResult.data ?? []}
             key={`${company.id}:${servicesResult.data?.map((service) => `${service.id}-${service.nev}-${service.idotartam_percben}-${service.ar}-${service.leiras}-${service.is_active}`).join(",")}`}
           />
         )}
+        <PremiumFeaturesSection
+          blacklist={blacklistEntries}
+          companyId={company.id}
+          customFieldsCount={customFieldLabels.size}
+          customerHistory={customerHistory}
+          notes={notesList}
+          plan={companyPlan}
+          recentBookings={bookings.map((b) => ({
+            id: b.id,
+            ugyfel_nev: b.ugyfel_nev,
+            ugyfel_email: b.ugyfel_email,
+            ugyfel_telefon: b.ugyfel_telefon,
+            kezdes_ideje: b.kezdes_ideje,
+            status: "confirmed",
+          }))}
+          stats={monthlyStats}
+        />
       </div>
     </DashboardShell>
   );

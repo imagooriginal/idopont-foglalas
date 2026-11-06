@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
+import { deliverBookingConfirmationEmail } from "@/lib/booking-emails";
 import { checkRateLimit, hashIdentifier, uuidSchema } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -17,7 +18,7 @@ export interface SuperadminActionState {
   success?: string;
 }
 
-type CompanyPlan = "free" | "starter" | "pro";
+export type CompanyPlan = "starter" | "pro";
 type BusinessHourEntry = {
   weekday: number;
   is_open: boolean;
@@ -68,7 +69,7 @@ const tenantBaseSchema = z
       .trim()
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
     primaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
-    plan: z.enum(["free", "starter", "pro"]),
+    plan: z.enum(["starter", "pro"]).default("starter"),
     openingTime: timeStringSchema,
     closingTime: timeStringSchema,
     timeZone: z
@@ -182,14 +183,15 @@ async function getSuperadminClients() {
 interface TenantCompanyPermissions {
   id: string;
   owner_id: string;
-  can_edit_prices: boolean;
-  can_manage_services_advanced: boolean;
+  plan?: string;
+  can_edit_prices?: boolean;
+  can_manage_services_advanced?: boolean;
 }
 
 /**
  * Explicitly verifies on the server that the authenticated user owns `companyId`
  * (or is a platform admin) and checks required service-management permission flags
- * to prevent IDOR and privilege escalation across tenants.
+ * or Pro subscription tier to prevent IDOR and privilege escalation across tenants.
  */
 async function verifyTenantCompanyAccess(
   supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
@@ -197,6 +199,7 @@ async function verifyTenantCompanyAccess(
   requirements?: {
     requireAdvancedServices?: boolean;
     requireEditPrices?: boolean;
+    requireProPlan?: boolean;
   },
 ): Promise<{
   ok: boolean;
@@ -210,7 +213,7 @@ async function verifyTenantCompanyAccess(
 
   const { data: company, error: companyError } = await supabase
     .from("companies")
-    .select("id, owner_id, can_edit_prices, can_manage_services_advanced")
+    .select("id, owner_id, plan, can_edit_prices, can_manage_services_advanced")
     .eq("id", companyId)
     .maybeSingle();
 
@@ -235,8 +238,20 @@ async function verifyTenantCompanyAccess(
 
   if (
     !isAdmin &&
+    requirements?.requireProPlan &&
+    (company.plan ?? "starter") !== "pro"
+  ) {
+    return {
+      ok: false,
+      error:
+        "Ez a funkció kizárólag a Prémium (Pro) csomagban érhető el. Kérd az adminisztrátortól a csomagváltást.",
+    };
+  }
+
+  if (
+    !isAdmin &&
     requirements?.requireAdvancedServices &&
-    !company.can_manage_services_advanced
+    company.can_manage_services_advanced === false
   ) {
     return {
       ok: false,
@@ -247,7 +262,7 @@ async function verifyTenantCompanyAccess(
   if (
     !isAdmin &&
     requirements?.requireEditPrices &&
-    !company.can_edit_prices
+    company.can_edit_prices === false
   ) {
     return {
       ok: false,
@@ -268,18 +283,25 @@ export async function createTenantAction(
   const customBookingFields = parseCustomBookingFields(
     String(formData.get("customBookingFields") ?? ""),
   );
+  const rawPlan = String(formData.get("plan") ?? "starter").trim();
+  const normalizedPlan = rawPlan === "free" || !rawPlan ? "starter" : rawPlan;
   const parsed = tenantBaseSchema.safeParse({
     name: String(formData.get("name") ?? ""),
     slug: String(formData.get("slug") ?? ""),
     primaryColor: String(formData.get("primaryColor") ?? ""),
-    plan: String(formData.get("plan") ?? ""),
+    plan: normalizedPlan,
     openingTime: String(formData.get("openingTime") ?? ""),
     closingTime: String(formData.get("closingTime") ?? ""),
     timeZone: String(formData.get("timeZone") ?? ""),
     slotIntervalMinutes: Number(formData.get("slotIntervalMinutes")),
-    canEditPrices: formData.get("canEditPrices") === "on",
-    canManageServicesAdvanced:
-      formData.get("canManageServicesAdvanced") === "on",
+    canEditPrices: formData.has("canEditPrices")
+      ? formData.get("canEditPrices") === "on" ||
+        formData.get("canEditPrices") === "true"
+      : true,
+    canManageServicesAdvanced: formData.has("canManageServicesAdvanced")
+      ? formData.get("canManageServicesAdvanced") === "on" ||
+        formData.get("canManageServicesAdvanced") === "true"
+      : true,
   });
 
   if (
@@ -412,18 +434,23 @@ export async function updateTenantSettingsAction(
   const customBookingFields = parseCustomBookingFields(
     String(formData.get("customBookingFields") ?? ""),
   );
+  const rawPlan = String(formData.get("plan") ?? "starter").trim();
+  const normalizedPlan = rawPlan === "free" || !rawPlan ? "starter" : rawPlan;
   const parsed = tenantBaseSchema.safeParse({
     name: String(formData.get("name") ?? ""),
     slug: String(formData.get("slug") ?? ""),
     primaryColor: String(formData.get("primaryColor") ?? ""),
-    plan: String(formData.get("plan") ?? ""),
+    plan: normalizedPlan,
     openingTime: String(formData.get("openingTime") ?? ""),
     closingTime: String(formData.get("closingTime") ?? ""),
     timeZone: String(formData.get("timeZone") ?? ""),
     slotIntervalMinutes: Number(formData.get("slotIntervalMinutes")),
-    canEditPrices: formData.get("canEditPrices") === "on",
+    canEditPrices:
+      formData.get("canEditPrices") === "on" ||
+      formData.get("canEditPrices") === "true",
     canManageServicesAdvanced:
-      formData.get("canManageServicesAdvanced") === "on",
+      formData.get("canManageServicesAdvanced") === "on" ||
+      formData.get("canManageServicesAdvanced") === "true",
   });
 
   if (!companyIdResult.success || !parsed.success || customBookingFields === null) {
@@ -511,7 +538,7 @@ export async function updateTenantPlanAction(
   const parsed = z
     .object({
       companyId: uuidSchema,
-      plan: z.enum(["free", "starter", "pro"]),
+      plan: z.enum(["starter", "pro"]),
     })
     .safeParse({
       companyId: formData.get("companyId"),
@@ -537,6 +564,8 @@ export async function updateTenantPlanAction(
   }
 
   revalidatePath("/superadmin");
+  revalidatePath("/dashboard");
+  revalidatePath("/", "layout");
   return { success: "A csomag frissült." };
 }
 
@@ -1205,4 +1234,354 @@ export async function deleteBlockoutAction(formData: FormData) {
   }
 
   revalidatePath("/dashboard");
+}
+
+const manualBookingSchema = z.object({
+  companyId: uuidSchema,
+  serviceId: uuidSchema,
+  startsAt: z
+    .string()
+    .refine((val) => Number.isFinite(new Date(val).getTime())),
+  customerName: z.string().trim().min(1).max(200),
+  customerPhone: z.string().trim().max(40).default(""),
+  customerEmail: z
+    .string()
+    .trim()
+    .max(320)
+    .refine(
+      (val) => !val || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val),
+      "Érvénytelen e-mail-cím.",
+    )
+    .default(""),
+});
+
+export async function createManualBookingAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = manualBookingSchema.safeParse({
+    companyId: String(formData.get("companyId") ?? ""),
+    serviceId: String(formData.get("serviceId") ?? ""),
+    startsAt: String(
+      formData.get("startsAt") ?? formData.get("startTime") ?? "",
+    ),
+    customerName: String(formData.get("customerName") ?? ""),
+    customerPhone: String(formData.get("customerPhone") ?? ""),
+    customerEmail: String(formData.get("customerEmail") ?? ""),
+  });
+
+  if (!parsed.success) {
+    return {
+      error:
+        "Adj meg érvényes ügyfélnevet, szolgáltatást, időpontot és elérhetőséget.",
+    };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const startIso = new Date(parsed.data.startsAt).toISOString();
+  const { data: bookingId, error } = await supabase.rpc(
+    "create_manual_booking",
+    {
+      p_company_id: parsed.data.companyId,
+      p_service_ids: [parsed.data.serviceId],
+      p_start: startIso,
+      p_customer_name: parsed.data.customerName,
+      p_customer_phone: parsed.data.customerPhone || null,
+      p_customer_email: parsed.data.customerEmail || null,
+    },
+  );
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError("A kézi foglalás mentése nem sikerült", error),
+    };
+  }
+
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM_EMAIL;
+  if (
+    parsed.data.customerEmail &&
+    typeof bookingId === "string" &&
+    bookingId &&
+    apiKey &&
+    from
+  ) {
+    try {
+      const admin = createSupabaseAdminClient();
+      await deliverBookingConfirmationEmail(admin, bookingId, {
+        apiKey,
+        from,
+        timeoutMs: 3000,
+      });
+    } catch (emailErr) {
+      console.error("Manual booking confirmation email failed", emailErr);
+    }
+  }
+
+  revalidatePath("/dashboard");
+  return { success: "A kézi foglalást sikeresen rögzítettük." };
+}
+
+const customerNoteSchema = z.object({
+  companyId: uuidSchema,
+  customerEmail: z
+    .string()
+    .trim()
+    .min(3)
+    .max(320)
+    .refine((val) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)),
+  customerPhone: z.string().trim().max(40).default(""),
+  privateNote: z.string().trim().max(2000),
+});
+
+export async function saveCustomerNoteAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = customerNoteSchema.safeParse({
+    companyId: String(formData.get("companyId") ?? ""),
+    customerEmail: String(formData.get("customerEmail") ?? "").toLowerCase(),
+    customerPhone: String(formData.get("customerPhone") ?? ""),
+    privateNote: String(formData.get("privateNote") ?? ""),
+  });
+
+  if (!parsed.success) {
+    return {
+      error:
+        "Adj meg érvényes ügyfél e-mail-címet és legfeljebb 2000 karakteres belső megjegyzést.",
+    };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+    { requireProPlan: true },
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { error } = await supabase.from("customer_notes").upsert(
+    {
+      company_id: parsed.data.companyId,
+      customer_email: parsed.data.customerEmail,
+      customer_phone: parsed.data.customerPhone || null,
+      private_note: parsed.data.privateNote,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "company_id,customer_email" },
+  );
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError(
+        "Az ügyféljegyzet mentése nem sikerült",
+        error,
+      ),
+    };
+  }
+
+  revalidatePath("/dashboard");
+  return { success: "A privát ügyféljegyzet elmentve." };
+}
+
+const markNoShowSchema = z.object({
+  companyId: uuidSchema,
+  bookingId: uuidSchema,
+  addToBlacklist: z.boolean().default(false),
+  reason: z.string().trim().max(500).default("Nem jelent meg az időponton (No-Show)"),
+});
+
+export async function markBookingNoShowAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = markNoShowSchema.safeParse({
+    companyId: String(formData.get("companyId") ?? ""),
+    bookingId: String(formData.get("bookingId") ?? ""),
+    addToBlacklist:
+      formData.get("addToBlacklist") === "on" ||
+      formData.get("addToBlacklist") === "true",
+    reason:
+      String(formData.get("reason") ?? "").trim() ||
+      "Nem jelent meg az időponton (No-Show)",
+  });
+
+  if (!parsed.success) {
+    return { error: "Érvénytelen foglalás- vagy szolgáltató-azonosító." };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+    { requireProPlan: true },
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { data: updatedBooking, error: updateError } = await supabase
+    .from("bookings")
+    .update({ status: "no_show" })
+    .eq("id", parsed.data.bookingId)
+    .eq("cég_id", parsed.data.companyId)
+    .select("id, ugyfel_email, ugyfel_telefon")
+    .maybeSingle();
+
+  if (updateError || !updatedBooking) {
+    return {
+      error: sanitizeDatabaseError(
+        "A foglalás No-Show megjelölése nem sikerült",
+        updateError,
+      ),
+    };
+  }
+
+  if (
+    parsed.data.addToBlacklist &&
+    (updatedBooking.ugyfel_email || updatedBooking.ugyfel_telefon)
+  ) {
+    const { error: blError } = await supabase.from("company_blacklist").insert({
+      company_id: parsed.data.companyId,
+      email: updatedBooking.ugyfel_email
+        ? String(updatedBooking.ugyfel_email).toLowerCase()
+        : null,
+      phone: updatedBooking.ugyfel_telefon
+        ? String(updatedBooking.ugyfel_telefon)
+        : null,
+      reason: parsed.data.reason,
+    });
+    if (blError) {
+      return {
+        error: sanitizeDatabaseError(
+          "A feketelistára helyezés nem sikerült",
+          blError,
+        ),
+      };
+    }
+  }
+
+  revalidatePath("/dashboard");
+  return {
+    success: parsed.data.addToBlacklist
+      ? "A foglalást No-Show-ként jelöltük, és az ügyfél felkerült a feketelistára."
+      : "A foglalást 'Nem jelent meg' (No-Show) státuszra állítottuk.",
+  };
+}
+
+const blacklistEntrySchema = z
+  .object({
+    companyId: uuidSchema,
+    email: z.string().trim().max(320).default(""),
+    phone: z.string().trim().max(40).default(""),
+    reason: z.string().trim().max(500).default(""),
+  })
+  .refine(
+    (val) => Boolean(val.email || val.phone),
+    "Adj meg e-mail-címet vagy telefonszámot.",
+  );
+
+export async function addBlacklistEntryAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = blacklistEntrySchema.safeParse({
+    companyId: String(formData.get("companyId") ?? ""),
+    email: String(formData.get("email") ?? "").toLowerCase(),
+    phone: String(formData.get("phone") ?? ""),
+    reason: String(formData.get("reason") ?? ""),
+  });
+
+  if (!parsed.success) {
+    return {
+      error:
+        "Adj meg legalább egy e-mail-címet vagy telefonszámot a feketelistára helyezéshez.",
+    };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+    { requireProPlan: true },
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { error } = await supabase.from("company_blacklist").insert({
+    company_id: parsed.data.companyId,
+    email: parsed.data.email || null,
+    phone: parsed.data.phone || null,
+    reason: parsed.data.reason || "Feketelistás ügyfél",
+  });
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError(
+        "A feketelistás bejegyzés mentése nem sikerült",
+        error,
+      ),
+    };
+  }
+
+  revalidatePath("/dashboard");
+  return { success: "Az ügyfél sikeresen felkerült a feketelistára." };
+}
+
+export async function removeBlacklistEntryAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = z
+    .object({
+      companyId: uuidSchema,
+      blacklistId: uuidSchema,
+    })
+    .safeParse({
+      companyId: formData.get("companyId"),
+      blacklistId: formData.get("blacklistId"),
+    });
+
+  if (!parsed.success) {
+    return { error: "Érvénytelen feketelista-azonosító." };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+    { requireProPlan: true },
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { error } = await supabase
+    .from("company_blacklist")
+    .delete()
+    .eq("id", parsed.data.blacklistId)
+    .eq("company_id", parsed.data.companyId);
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError(
+        "A feketelistás tiltás törlése nem sikerült",
+        error,
+      ),
+    };
+  }
+
+  revalidatePath("/dashboard");
+  return { success: "A feketelistás tiltást feloldottuk." };
 }

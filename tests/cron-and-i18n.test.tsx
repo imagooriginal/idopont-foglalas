@@ -157,6 +157,7 @@ describe("Cron Jobs (24h Reminders, Outbox Retry, GC & GDPR Retention) and One-C
                     id: "company-1",
                     nev: "Boti-motorszervize",
                     owner_id: "owner-1",
+                    plan: "pro",
                     time_zone: "Europe/Budapest",
                     custom_booking_fields: [
                       { key: "rendszam", label: "Rendszám", type: "text", required: true },

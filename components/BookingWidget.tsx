@@ -133,6 +133,93 @@ export default function BookingWidget({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const { t } = useLanguage();
+  const storageKey = `booking_lock_state_${companySlug}`;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.sessionStorage.getItem(storageKey);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as {
+        lock?: LockResponse;
+        selectedServiceIds?: string[];
+        bookingFields?: Record<string, string>;
+        customer?: { name: string; email: string; phone: string };
+        privacyAccepted?: boolean;
+        emailCodeSent?: boolean;
+        emailVerified?: boolean;
+      };
+      if (!saved?.lock?.lockedUntil || !saved.lock.lockToken) {
+        window.sessionStorage.removeItem(storageKey);
+        return;
+      }
+      const remainingSeconds = Math.floor(
+        (new Date(saved.lock.lockedUntil).getTime() - Date.now()) / 1000,
+      );
+      if (remainingSeconds <= 0) {
+        window.sessionStorage.removeItem(storageKey);
+        return;
+      }
+      const restoredServices = services.filter((s) =>
+        saved.selectedServiceIds?.includes(s.id),
+      );
+      if (restoredServices.length > 0) {
+        setSelectedServices(restoredServices);
+      }
+      if (saved.bookingFields && typeof saved.bookingFields === "object") {
+        setBookingFields(saved.bookingFields);
+      }
+      if (saved.customer && typeof saved.customer === "object") {
+        setCustomer({
+          name: String(saved.customer.name ?? ""),
+          email: String(saved.customer.email ?? ""),
+          phone: String(saved.customer.phone ?? ""),
+        });
+      }
+      setPrivacyAccepted(Boolean(saved.privacyAccepted));
+      setEmailCodeSent(Boolean(saved.emailCodeSent));
+      setEmailVerified(Boolean(saved.emailVerified));
+      setLock(saved.lock);
+      setTimeLeft(remainingSeconds);
+      setStep(3);
+    } catch {
+      // Ignore malformed sessionStorage data
+    }
+  }, [storageKey, services]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      if (step === 3 && lock) {
+        window.sessionStorage.setItem(
+          storageKey,
+          JSON.stringify({
+            lock,
+            selectedServiceIds: selectedServices.map((s) => s.id),
+            bookingFields,
+            customer,
+            privacyAccepted,
+            emailCodeSent,
+            emailVerified,
+          }),
+        );
+      } else if (step === 4) {
+        window.sessionStorage.removeItem(storageKey);
+      }
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [
+    step,
+    lock,
+    selectedServices,
+    bookingFields,
+    customer,
+    privacyAccepted,
+    emailCodeSent,
+    emailVerified,
+    storageKey,
+  ]);
 
   const selectedServiceIds = selectedServices.map((service) => service.id);
   const totalServiceDuration = selectedServices.reduce(
@@ -247,6 +334,11 @@ export default function BookingWidget({
       );
       setTimeLeft(seconds);
       if (seconds === 0) {
+        try {
+          window.sessionStorage.removeItem(storageKey);
+        } catch {
+          // Ignore
+        }
         setLock(null);
         setError("Az időzárolás lejárt. Kérlek, válassz új időpontot.");
         setStep(2);
@@ -256,7 +348,7 @@ export default function BookingWidget({
     updateCountdown();
     const timer = window.setInterval(updateCountdown, 1000);
     return () => window.clearInterval(timer);
-  }, [lock, step]);
+  }, [lock, step, storageKey]);
 
   async function handleSelectSlot(slot: string) {
     if (!selectedServices.length) return;
@@ -371,6 +463,13 @@ export default function BookingWidget({
   }
 
   function reset() {
+    if (typeof window !== "undefined") {
+      try {
+        window.sessionStorage.removeItem(storageKey);
+      } catch {
+        // Ignore
+      }
+    }
     setStep(1);
     setSelectedServices([]);
     setSlotResult(null);

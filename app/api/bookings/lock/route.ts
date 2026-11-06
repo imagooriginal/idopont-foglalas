@@ -59,11 +59,14 @@ export async function POST(request: Request) {
   if (typeof (supabase as { from?: unknown }).from === "function") {
     const { data: companyData } = await supabase
       .from("companies")
-      .select("custom_booking_fields")
+      .select("plan, custom_booking_fields")
       .eq("id", body.companyId)
       .maybeSingle();
 
-    if (companyData?.custom_booking_fields !== undefined) {
+    const companyPlan = (companyData as { plan?: string } | null)?.plan;
+    if (companyPlan === "starter") {
+      validatedCustomFields = {};
+    } else if (companyData?.custom_booking_fields !== undefined) {
       const definitionsResult =
         customBookingFieldDefinitionsListSchema.safeParse(
           companyData.custom_booking_fields,

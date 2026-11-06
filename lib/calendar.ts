@@ -72,6 +72,22 @@ function sanitizeSafeHttpsUrl(url: string) {
   return "https://calendar.google.com/calendar/render";
 }
 
+function sanitizeSafeActionUrl(url: string): string | null {
+  const cleaned = url.replace(/[\r\n\x00-\x1f\x7f]/g, "").trim();
+  try {
+    const parsed = new URL(cleaned);
+    if (
+      parsed.protocol === "https:" ||
+      (parsed.protocol === "http:" && parsed.hostname === "localhost")
+    ) {
+      return cleaned;
+    }
+  } catch {
+    // Reject unsafe URL
+  }
+  return null;
+}
+
 export function createGoogleCalendarUrl(event: CalendarEvent) {
   const params = new URLSearchParams({
     action: "TEMPLATE",
@@ -122,6 +138,7 @@ export function createBookingEmailHtml({
   googleCalendarUrl,
   extraFields = [],
   introText = "A foglalás részletei:",
+  cancellationUrl,
 }: {
   greeting: string;
   companyName: string;
@@ -132,6 +149,7 @@ export function createBookingEmailHtml({
   googleCalendarUrl: string;
   extraFields?: Array<[string, string]>;
   introText?: string;
+  cancellationUrl?: string;
 }) {
   const rows: Array<[string, string]> = [
     ["Szolgáltató", sanitizeSingleLineText(companyName)],
@@ -152,8 +170,14 @@ export function createBookingEmailHtml({
     .join("");
   const safeUrl = sanitizeSafeHttpsUrl(googleCalendarUrl);
   const safeIntro = escapeHtml(sanitizeSingleLineText(introText));
+  const safeCancelUrl = cancellationUrl
+    ? sanitizeSafeActionUrl(cancellationUrl)
+    : null;
+  const cancelBlock = safeCancelUrl
+    ? `<p style="margin-top:16px"><a href="${escapeHtml(safeCancelUrl)}" style="display:inline-block;padding:10px 16px;background:#dc2626;color:#fff;text-decoration:none;border-radius:6px;font-size:14px">Időpont lemondása</a></p><p style="font-size:12px;color:#64748b">Online lemondás a kezdés előtt legkésőbb 24 órával lehetséges.</p>`
+    : "";
 
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033"><h1 style="font-size:22px">${escapeHtml(sanitizeSingleLineText(greeting))}</h1><p>${safeIntro}</p><table style="border-collapse:collapse;width:100%">${details}</table><p style="margin-top:24px"><a href="${escapeHtml(safeUrl)}" style="display:inline-block;padding:12px 18px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:6px">Hozzáadás a Google Naptárhoz</a></p><p style="font-size:13px;color:#526078">A naptármeghívó ICS-fájlként is csatolva van ehhez az e-mailhez.</p></div>`;
+  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033"><h1 style="font-size:22px">${escapeHtml(sanitizeSingleLineText(greeting))}</h1><p>${safeIntro}</p><table style="border-collapse:collapse;width:100%">${details}</table><p style="margin-top:24px"><a href="${escapeHtml(safeUrl)}" style="display:inline-block;padding:12px 18px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:6px">Hozzáadás a Google Naptárhoz</a></p>${cancelBlock}<p style="font-size:13px;color:#526078">A naptármeghívó ICS-fájlként is csatolva van ehhez az e-mailhez.</p></div>`;
 }
 
 export function createReminderEmailHtml(params: {
@@ -165,6 +189,7 @@ export function createReminderEmailHtml(params: {
   end: string;
   googleCalendarUrl: string;
   extraFields?: Array<[string, string]>;
+  cancellationUrl?: string;
 }) {
   return createBookingEmailHtml({
     ...params,

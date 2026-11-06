@@ -203,12 +203,11 @@ function TenantCreateForm() {
             Csomag
             <select
               className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 font-normal outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-              defaultValue="free"
+              defaultValue="starter"
               name="plan"
             >
-              <option value="free">Free</option>
-              <option value="starter">Starter</option>
-              <option value="pro">Pro</option>
+              <option value="starter">Alap (Starter)</option>
+              <option value="pro">Prémium (Pro)</option>
             </select>
           </label>
         </div>
@@ -265,6 +264,7 @@ function TenantCreateForm() {
         <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3 text-sm text-slate-700">
           <input
             className="mt-0.5 size-4 accent-blue-700"
+            defaultChecked
             name="canEditPrices"
             type="checkbox"
           />
@@ -273,13 +273,14 @@ function TenantCreateForm() {
               Ár és leírás módosításának engedélyezése
             </span>
             <span className="mt-0.5 block text-xs text-slate-500">
-              A szolgáltató csak meglévő szolgáltatások árát és leírását módosíthatja.
+              Alapértelmezetten engedélyezett az Alap és Prémium csomagban is (egyedileg felülbírálható).
             </span>
           </span>
         </label>
         <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3 text-sm text-slate-700">
           <input
             className="mt-0.5 size-4 accent-blue-700"
+            defaultChecked
             name="canManageServicesAdvanced"
             type="checkbox"
           />
@@ -288,12 +289,17 @@ function TenantCreateForm() {
               Haladó szolgáltatáskezelés engedélyezése
             </span>
             <span className="mt-0.5 block text-xs text-slate-500">
-              Új szolgáltatást adhat hozzá, módosíthatja az időtartamot és elrejtheti a szolgáltatásokat.
+              Új szolgáltatást adhat hozzá, módosíthatja az időtartamot és törölheti/elrejtheti a szolgáltatásokat.
             </span>
           </span>
         </label>
         <label className="block space-y-1.5 text-sm font-medium text-slate-700">
-          Extra foglalási kérdések
+          <span className="flex items-center justify-between gap-2">
+            <span>Extra foglalási kérdések</span>
+            <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-semibold text-amber-800">
+              Prémium (Pro) funkció
+            </span>
+          </span>
           <textarea
             className="min-h-24 w-full rounded-xl border border-slate-200 px-3 py-2.5 font-normal"
             name="customBookingFields"
@@ -301,7 +307,7 @@ function TenantCreateForm() {
             rows={3}
           />
           <span className="block text-xs font-normal text-slate-500">
-            Egy mező soronként; a *-gal kezdődő mező kötelező. Üresen hagyva nem kérünk extra adatot.
+            Egy mező soronként; a *-gal kezdődő mező kötelező. Csak Prémium (Pro) csomagban jelenik meg a publikus foglalóoldalon.
           </span>
         </label>
         <ActionMessage state={state} />
@@ -379,12 +385,11 @@ function TenantSettingsForm({ company }: { company: SuperadminCompany }) {
           Csomag
           <select
             className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 font-normal"
-            defaultValue={company.plan}
+            defaultValue={company.plan === "pro" ? "pro" : "starter"}
             name="plan"
           >
-            <option value="free">Free</option>
-            <option value="starter">Starter</option>
-            <option value="pro">Pro</option>
+            <option value="starter">Alap (Starter)</option>
+            <option value="pro">Prémium (Pro)</option>
           </select>
         </label>
         <label className="space-y-1.5 text-sm font-medium text-slate-700">
@@ -467,7 +472,12 @@ function TenantSettingsForm({ company }: { company: SuperadminCompany }) {
         </span>
       </label>
       <label className="block space-y-1.5 text-sm font-medium text-slate-700">
-        Extra foglalási kérdések
+        <span className="flex items-center justify-between gap-2">
+          <span>Extra foglalási kérdések</span>
+          <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-semibold text-amber-800">
+            Prémium (Pro) funkció
+          </span>
+        </span>
         <textarea
           className="min-h-24 w-full rounded-xl border border-slate-200 px-3 py-2.5 font-normal"
           defaultValue={bookingFieldsToLines(company.custom_booking_fields)}
@@ -476,7 +486,7 @@ function TenantSettingsForm({ company }: { company: SuperadminCompany }) {
           rows={3}
         />
         <span className="block text-xs font-normal text-slate-500">
-          Egy mező soronként; a *-gal kezdődő mező kötelező.
+          Egy mező soronként; a *-gal kezdődő mező kötelező. Csak Prémium (Pro) csomagban aktív.
         </span>
       </label>
       <ActionMessage state={state} />
@@ -502,12 +512,11 @@ function PlanForm({ company }: { company: SuperadminCompany }) {
       <select
         aria-label={`${company.nev} csomagja`}
         className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-        defaultValue={company.plan}
+        defaultValue={company.plan === "pro" ? "pro" : "starter"}
         name="plan"
       >
-        <option value="free">Free</option>
-        <option value="starter">Starter</option>
-        <option value="pro">Pro</option>
+        <option value="starter">Alap (Starter)</option>
+        <option value="pro">Prémium (Pro)</option>
       </select>
       <button
         className="rounded-lg border border-slate-200 px-2.5 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
@@ -947,8 +956,7 @@ export default function SuperadminConsole({
     (company) => company.id === selectedCompanyId,
   );
   const plans = {
-    free: companies.filter((company) => company.plan === "free").length,
-    starter: companies.filter((company) => company.plan === "starter").length,
+    starter: companies.filter((company) => company.plan !== "pro").length,
     pro: companies.filter((company) => company.plan === "pro").length,
   };
 
@@ -998,16 +1006,16 @@ export default function SuperadminConsole({
             value={totalAuthUsers}
           />
           <Metric
-            color="text-slate-600"
-            detail="Csomagdíj-hozzárendelés nélkül"
-            label="Free csomag"
-            value={plans.free}
+            color="text-slate-700"
+            detail="Alapszintű előfizetők"
+            label="Alap (Starter) csomag"
+            value={plans.starter}
           />
           <Metric
             color="text-emerald-700"
-            detail={`Starter: ${plans.starter} · Pro: ${plans.pro}`}
-            label="Fizetős csomagcímke"
-            value={plans.starter + plans.pro}
+            detail="Minden prémium funkció aktív"
+            label="Prémium (Pro) csomag"
+            value={plans.pro}
           />
         </section>
 

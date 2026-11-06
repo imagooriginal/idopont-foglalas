@@ -110,7 +110,7 @@ async function buildBookingEmailContext(admin: AdminClient, bookingId: string) {
   const [companyResult, bookingServicesResult] = await Promise.all([
     admin
       .from("companies")
-      .select("id, nev, owner_id, time_zone, custom_booking_fields")
+      .select("id, nev, slug, owner_id, time_zone, plan, custom_booking_fields")
       .eq("id", booking.cég_id)
       .single(),
     admin
@@ -227,10 +227,24 @@ async function buildBookingEmailContext(admin: AdminClient, bookingId: string) {
   };
   const googleCalendarUrl = createGoogleCalendarUrl(calendarEvent);
   const ics = createIcsCalendarFile(calendarEvent);
+  const companyPlan =
+    (companyResult.data as { plan?: string }).plan ?? "pro";
+  const siteBase = (
+    process.env.NEXT_PUBLIC_SITE_URL || "https://idopontfoglalo.hu"
+  ).replace(/\/+$/, "");
+  const cancellationUrl =
+    companyPlan === "pro" && booking.cancellation_token
+      ? `${siteBase}/cancel/${encodeURIComponent(String(booking.cancellation_token))}`
+      : undefined;
 
   return {
     booking,
-    company: companyResult.data,
+    company: companyResult.data as typeof companyResult.data & {
+      plan?: string;
+      slug?: string;
+    },
+    companyPlan,
+    cancellationUrl,
     serviceName,
     extraFields,
     startLabel,
@@ -263,29 +277,32 @@ export async function deliverBookingConfirmationEmail(
   }
 
   const resend = new Resend(options.apiKey);
-  const customerEmail: BookingEmailMessage = {
-    to: ctx.booking.ugyfel_email,
-    subject: "Időpontfoglalás visszaigazolása",
-    html: createBookingEmailHtml({
-      greeting: `Kedves ${ctx.safeCustomerName}!`,
-      companyName: ctx.safeCompanyName,
-      serviceName: ctx.serviceName,
-      customerName: ctx.safeCustomerName,
-      start: ctx.startLabel,
-      end: ctx.endLabel,
-      googleCalendarUrl: ctx.googleCalendarUrl,
-      extraFields: ctx.extraFields,
-    }),
-    ics: ctx.ics,
-  };
+  const recipients: BookingEmailMessage[] = [];
+  if (ctx.booking.ugyfel_email) {
+    recipients.push({
+      to: ctx.booking.ugyfel_email,
+      subject: "Időpontfoglalás visszaigazolása",
+      html: createBookingEmailHtml({
+        greeting: `Kedves ${ctx.safeCustomerName}!`,
+        companyName: ctx.safeCompanyName,
+        serviceName: ctx.serviceName,
+        customerName: ctx.safeCustomerName,
+        start: ctx.startLabel,
+        end: ctx.endLabel,
+        googleCalendarUrl: ctx.googleCalendarUrl,
+        extraFields: ctx.extraFields,
+        cancellationUrl: ctx.cancellationUrl,
+      }),
+      ics: ctx.ics,
+    });
+  }
 
-  const recipients: BookingEmailMessage[] = [customerEmail];
   const ownerEmail = ownerResult.user?.email;
   const allRecipientsConfigured = Boolean(ownerEmail);
   if (ownerEmail) {
     recipients.push({
-      ...customerEmail,
       to: ownerEmail,
+      subject: "Időpontfoglalás visszaigazolása",
       html: createBookingEmailHtml({
         greeting: `Új foglalás: ${ctx.safeCustomerName}`,
         companyName: ctx.safeCompanyName,
@@ -296,6 +313,7 @@ export async function deliverBookingConfirmationEmail(
         googleCalendarUrl: ctx.googleCalendarUrl,
         extraFields: ctx.extraFields,
       }),
+      ics: ctx.ics,
     });
   } else {
     console.error("No email address is associated with the company owner", {
@@ -334,7 +352,8 @@ export async function deliverBookingReminderEmail(
 ): Promise<{ sent: boolean }> {
   const timeoutMs = options.timeoutMs ?? 8000;
   const ctx = await buildBookingEmailContext(admin, bookingId);
-  if (!ctx.booking.ugyfel_email) {
+  // 24-hour automated reminders are a Pro (Prémium) feature only
+  if (ctx.companyPlan !== "pro" || !ctx.booking.ugyfel_email) {
     return { sent: false };
   }
 
@@ -351,6 +370,7 @@ export async function deliverBookingReminderEmail(
       end: ctx.endLabel,
       googleCalendarUrl: ctx.googleCalendarUrl,
       extraFields: ctx.extraFields,
+      cancellationUrl: ctx.cancellationUrl,
     }),
     ics: ctx.ics,
   };
@@ -371,6 +391,90 @@ export async function deliverBookingReminderEmail(
       })
       .eq("id", bookingId);
   }
+
+  return { sent };
+}
+
+export async function deliverProviderCancellationNoticeEmail(
+  admin: AdminClient,
+  details: {
+    companyId: string;
+    companyName: string;
+    customerName: string;
+    customerEmail: string;
+    startsAt: string;
+    endsAt: string;
+  },
+  options: {
+    apiKey: string;
+    from: string;
+    timeoutMs?: number;
+  },
+): Promise<{ sent: boolean }> {
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const { data: company } = await admin
+    .from("companies")
+    .select("owner_id, time_zone")
+    .eq("id", details.companyId)
+    .maybeSingle();
+
+  if (!company?.owner_id) {
+    return { sent: false };
+  }
+
+  const { data: ownerResult } = await admin.auth.admin.getUserById(
+    company.owner_id,
+  );
+  const ownerEmail = ownerResult?.user?.email;
+  if (!ownerEmail) {
+    return { sent: false };
+  }
+
+  const timeZone = company.time_zone || "Europe/Budapest";
+  const start = new Date(details.startsAt);
+  const end = new Date(details.endsAt);
+  const startLabel = new Intl.DateTimeFormat("hu-HU", {
+    dateStyle: "full",
+    timeStyle: "short",
+    timeZone,
+  }).format(start);
+  const endLabel = new Intl.DateTimeFormat("hu-HU", {
+    dateStyle: "short",
+    timeStyle: "short",
+    timeZone,
+  }).format(end);
+
+  const resend = new Resend(options.apiKey);
+  const html = createBookingEmailHtml({
+    greeting: `Lemondott foglalás: ${sanitizeSingleLineText(details.customerName)}`,
+    companyName: sanitizeSingleLineText(details.companyName),
+    serviceName: "Ügyfél által online lemondott időpont",
+    customerName: sanitizeSingleLineText(details.customerName),
+    start: startLabel,
+    end: endLabel,
+    googleCalendarUrl: "https://calendar.google.com/calendar/render",
+    introText:
+      "Az ügyfél online lemondta a foglalását (legalább 24 órával a kezdés előtt). Az idősáv automatikusan felszabadult:",
+  });
+
+  const ics = createIcsCalendarFile({
+    title: `LEMONDVA – ${sanitizeSingleLineText(details.companyName)}`,
+    description: `Az ügyfél (${sanitizeSingleLineText(details.customerName)}) lemondta az időpontot.`,
+    start,
+    end,
+  });
+
+  const sent = await sendSingleEmailWithTimeout(
+    resend,
+    options.from,
+    {
+      to: ownerEmail,
+      subject: `Időpont lemondva: ${sanitizeSingleLineText(details.customerName)}`,
+      html,
+      ics,
+    },
+    timeoutMs,
+  );
 
   return { sent };
 }

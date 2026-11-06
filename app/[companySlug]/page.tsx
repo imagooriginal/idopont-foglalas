@@ -63,7 +63,7 @@ export default async function CompanyBookingPage({
   const supabase = createSupabasePublicClient();
   const { data: company, error: companyError } = await supabase
     .from("companies")
-    .select("id, nev, slug, time_zone, slot_interval_minutes, primary_color, custom_booking_fields")
+    .select("id, nev, slug, plan, time_zone, slot_interval_minutes, primary_color, custom_booking_fields")
     .eq("slug", companySlug)
     .maybeSingle();
 
@@ -94,9 +94,12 @@ export default async function CompanyBookingPage({
     /^#[0-9a-fA-F]{6}$/.test(company.primary_color)
       ? company.primary_color
       : "#1d4ed8";
-  const customBookingFields = Array.isArray(company.custom_booking_fields)
-    ? company.custom_booking_fields.filter(isCustomBookingField)
-    : [];
+  const isProCompany =
+    (company as { plan?: string }).plan === "pro";
+  const customBookingFields =
+    isProCompany && Array.isArray(company.custom_booking_fields)
+      ? company.custom_booking_fields.filter(isCustomBookingField)
+      : [];
 
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-10 sm:px-6 sm:py-16">

@@ -52,6 +52,15 @@ export async function POST(request: Request) {
 
   if (confirmError || typeof bookingId !== "string" || !bookingId) {
     console.error("Booking confirmation RPC failed", confirmError);
+    if (confirmError?.message?.includes("restricted for this contact")) {
+      return Response.json(
+        {
+          error:
+            "Online foglalás nem elérhető, kérjük, vegye fel a kapcsolatot telefonon a szolgáltatóval.",
+        },
+        { status: 403 },
+      );
+    }
     return Response.json(
       {
         error:
