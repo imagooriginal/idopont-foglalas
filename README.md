@@ -28,9 +28,27 @@ adatbázissal és Auth-tal, valamint Resend e-mail-küldéssel.
    [`supabase/migrations/20261029110000_fixed_grid_slots.sql`](./supabase/migrations/20261029110000_fixed_grid_slots.sql)
    majd a
    [`supabase/migrations/20261029130000_multiple_booking_services.sql`](./supabase/migrations/20261029130000_multiple_booking_services.sql)
+   majd a
+   [`supabase/migrations/20261030230500_fix_booking_lock_ambiguous_locked_until.sql`](./supabase/migrations/20261030230500_fix_booking_lock_ambiguous_locked_until.sql)
+   majd a
+   [`supabase/migrations/20261031190000_weekly_slot_grid.sql`](./supabase/migrations/20261031190000_weekly_slot_grid.sql)
+   majd a
+   [`supabase/migrations/20261031220000_saas_management_and_booking_consent.sql`](./supabase/migrations/20261031220000_saas_management_and_booking_consent.sql)
+   majd a
+   [`supabase/migrations/20261101220000_company_hours_and_service_permissions.sql`](./supabase/migrations/20261101220000_company_hours_and_service_permissions.sql),
+   majd a
+   [`supabase/migrations/20261102220000_dynamic_booking_fields_and_service_access.sql`](./supabase/migrations/20261102220000_dynamic_booking_fields_and_service_access.sql)
+   majd a
+   [`supabase/migrations/20261102230000_booking_rpc_and_public_hours_fallback.sql`](./supabase/migrations/20261102230000_booking_rpc_and_public_hours_fallback.sql)
+   végül a
+   [`supabase/migrations/20261103000100_fix_booking_lock_json_object_count.sql`](./supabase/migrations/20261103000100_fix_booking_lock_json_object_count.sql)
    migrációt. Ne cseréld le az eredeti SQL-t a migrációkra. Előtte készíts
    adatbázis-mentést, és oldd fel az első migráció által jelzett esetleges
-   átfedő aktív foglalásokat.
+   átfedő aktív foglalásokat. Ha a korábbi migrációk már lefutottak, de egy
+   tenantnál hiányoznak a nyitvatartási sorok, futtasd le külön a
+   `20261102230000_booking_rpc_and_public_hours_fallback.sql` fájlt is: ez a
+   hétköznapi nyitvatartást a meglévő tenantokhoz is visszatölti, és frissíti
+   a Supabase API sémagyorsítótárát.
 
 4. Hozz létre egy platform-admin felhasználót a Supabase Authban, majd a SQL
    Editorban add hozzá az admin táblához:
@@ -45,9 +63,23 @@ adatbázissal és Auth-tal, valamint Resend e-mail-küldéssel.
    A dashboardos szolgáltatói felhasználónak a cég `owner_id` mezőjében
    szereplő Auth-felhasználónak kell lennie.
 
-5. Töltsd fel a `company_business_hours` táblát. A `weekday` értéke
-   `0 = vasárnap` ... `6 = szombat`; a napi nyitvatartás időzónája a
-   `companies.time_zone` mező.
+   A védett SaaS áttekintő a `/superadmin` útvonalon érhető el, és csak a
+   `platform_admins` táblában szereplő fiókkal használható. A tenant
+   létrehozásakor a megadott kapcsolattartó e-mail-címére meghívó megy. A
+   `free`, `starter` és `pro` értékek adminisztrátori csomagcímkék; fizetési
+   szolgáltató vagy automatikus előfizetés-kezelés nincs bekötve.
+
+5. Az új cégek hétköznapi nyitvatartási rekordjai automatikusan létrejönnek.
+   A részletes heti nyitvatartás és az ideiglenes zárvatartások a szolgáltatói
+   dashboardon módosíthatók. A `weekday` értéke `0 = vasárnap` ...
+   `6 = szombat`; a napi nyitvatartás időzónája a `companies.time_zone` mező.
+   Ha egy céghez egyáltalán nincs nyitvatartási rekord, a publikus slot RPC
+   hétköznapokon 08:00–16:00 közötti ideiglenes időpontokat számol, a
+   foglalásokkal és blokkolásokkal ütközést továbbra is ellenőrizve. A
+   `create_booking_lock` RPC a vendégfoglalás egyetlen publikus írási felülete;
+   ne engedélyezz közvetlen anon `INSERT`-et a `bookings` táblán.
+   A Superadmin felületen mezősoronként állíthatók be a foglaláskori extra
+   kérdések; a `*` jellel kezdődő mező kötelező.
 
 6. Indítsd el az alkalmazást:
 
@@ -94,6 +126,14 @@ fájl pedig a `coverage/lcov.info` helyre kerül. A CI ezt a parancsot futtatja,
   megjelennek.
 - Sikeres foglaláskor e-mail megy az ügyfélnek és a cég tulajdonosának; az
   üzenet Google Naptár-linket és ICS-naptárfájlt tartalmaz.
+- A foglalás előtt Supabase Auth egyszer használatos e-mail-kódot kér. A
+  foglalás csak az aktív, azonos e-mail-című, megerősített Auth-munkamenetből
+  véglegesíthető. Az e-mail-megerősítés és az adatkezelési tájékoztató
+  elfogadása egy adatbázis-műveletben kerül a foglaláshoz. Ehhez engedélyezd
+  az e-mailes OTP-t a Supabase Auth beállításaiban, és állíts be OTP-t
+  tartalmazó e-mail-sablont.
+- A foglalóoldal tenantonkénti főszínt és `display_order` szerinti
+  szolgáltatássorrendet használ.
 - A foglalás adatbázisban való véglegesítése akkor is megmarad, ha az e-mail
   konfigurációja hiányzik vagy a kézbesítés sikertelen; ilyen esetben a
   foglaló figyelmeztetést jelenít meg.

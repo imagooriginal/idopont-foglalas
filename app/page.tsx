@@ -1,8 +1,12 @@
 import Link from "next/link";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 
 export default function Home() {
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-950 px-5 py-16 text-white">
+    <main className="relative flex min-h-screen items-center justify-center bg-slate-950 px-5 py-16 text-white">
+      <div className="absolute right-5 top-5">
+        <LanguageSwitcher variant="dark" />
+      </div>
       <section className="w-full max-w-3xl">
         <p className="text-sm font-semibold uppercase tracking-[0.2em] text-blue-300">
           Időpontfoglaló
