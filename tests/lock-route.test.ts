@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const supabase = vi.hoisted(() => ({ rpc: vi.fn() }));
+const supabase = vi.hoisted(() => ({
+  from: undefined as (() => unknown) | undefined,
+  rpc: vi.fn(),
+}));
 
 vi.mock("../lib/supabase/public", () => ({
   createSupabasePublicClient: () => supabase,
@@ -21,6 +24,7 @@ function request(body: unknown) {
 
 describe("booking lock route", () => {
   beforeEach(() => {
+    supabase.from = undefined;
     supabase.rpc.mockResolvedValue({
       data: [
         {
@@ -81,7 +85,85 @@ describe("booking lock route", () => {
       p_vehicle_make: "Honda",
       p_vehicle_model: "Civic",
       p_vehicle_registration: "ABC123",
+      p_custom_fields: {},
     });
+  });
+
+  it("accepts dynamic fields without requiring vehicle-specific inputs", async () => {
+    supabase.from = vi.fn().mockReturnValue({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data: {
+              custom_booking_fields: [
+                {
+                  key: "rendszam",
+                  label: "Rendszám",
+                  type: "text",
+                  required: true,
+                },
+              ],
+            },
+            error: null,
+          }),
+        }),
+      }),
+    });
+
+    const response = await POST(
+      request({
+        companyId,
+        serviceIds: [serviceId],
+        start: "2030-01-15T10:00:00Z",
+        customFields: { rendszam: "ABC123" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      "create_booking_lock",
+      expect.objectContaining({
+        p_vehicle_make: null,
+        p_vehicle_model: null,
+        p_vehicle_registration: null,
+        p_custom_fields: { rendszam: "ABC123" },
+      }),
+    );
+  });
+
+  it("rejects whitespace-only required dynamic fields before creating a lock", async () => {
+    supabase.rpc.mockClear();
+    supabase.from = vi.fn().mockReturnValue({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data: {
+              custom_booking_fields: [
+                {
+                  key: "rendszam",
+                  label: "Rendszám",
+                  type: "text",
+                  required: true,
+                },
+              ],
+            },
+            error: null,
+          }),
+        }),
+      }),
+    });
+
+    const response = await POST(
+      request({
+        companyId,
+        serviceIds: [serviceId],
+        start: "2030-01-15T10:00:00Z",
+        customFields: { rendszam: "   " },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
   it("reports unavailable times as a conflict", async () => {
@@ -104,6 +186,54 @@ describe("booking lock route", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({
       error: "Ezt az időpontot időközben lefoglalták. Válassz másikat.",
+    });
+  });
+
+  it("reports a missing booking RPC migration instead of a generic save error", async () => {
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: { code: "PGRST202", message: "function not found" },
+    });
+
+    const response = await POST(
+      request({
+        companyId,
+        serviceIds: [serviceId],
+        start: "2030-01-15T09:00:00Z",
+        customFields: {},
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: expect.stringContaining(
+        "20261102220000_dynamic_booking_fields_and_service_access.sql",
+      ),
+    });
+  });
+
+  it("does not mistake an undefined function inside the RPC for a missing RPC migration", async () => {
+    supabase.rpc.mockResolvedValue({
+      data: null,
+      error: {
+        code: "42883",
+        message: "function jsonb_object_length(jsonb) does not exist",
+      },
+    });
+
+    const response = await POST(
+      request({
+        companyId,
+        serviceIds: [serviceId],
+        start: "2030-01-15T09:00:00Z",
+        customFields: {},
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      error:
+        "Az időpont zárolása nem sikerült. Ellenőrizd az adatokat, majd próbáld újra.",
     });
   });
 });
