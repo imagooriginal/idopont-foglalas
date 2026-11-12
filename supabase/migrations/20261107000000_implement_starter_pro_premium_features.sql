@@ -1,6 +1,21 @@
 -- Migration: Starter vs. Pro (Premium) Tier Architecture, Manual Bookings,
 -- Customer Cancellation (24h limit), Mini-CRM Notes, and No-Show Blacklist
 
+-- Add 'no_show' to public.booking_status enum (if bookings.status uses the enum type)
+do $$
+begin
+  if exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'booking_status'
+  ) then
+    execute 'alter type public.booking_status add value if not exists ''no_show''';
+  end if;
+end;
+$$;
+
 begin;
 
 -- 1. Convert any legacy 'free' tier to 'starter' and enforce ('starter', 'pro') only
@@ -105,11 +120,21 @@ $$;
 
 alter table public.bookings
   add constraint bookings_status_check
-  check (status in ('pending', 'confirmed', 'cancelled', 'no_show'));
+  check (status::text in ('pending', 'confirmed', 'cancelled', 'no_show'));
 
 alter table public.bookings
   add column if not exists cancellation_token uuid unique default gen_random_uuid(),
   add column if not exists cancelled_at timestamptz;
+
+grant update (status) on public.bookings to authenticated;
+
+drop policy if exists "Owners and admins can update booking status" on public.bookings;
+create policy "Owners and admins can update booking status"
+  on public.bookings
+  for update
+  to authenticated
+  using ((select public.can_manage_company(bookings.cég_id)))
+  with check ((select public.can_manage_company(bookings.cég_id)));
 
 create index if not exists bookings_cancellation_token_idx
   on public.bookings (cancellation_token)
@@ -119,12 +144,18 @@ create index if not exists bookings_cancellation_token_idx
 create table if not exists public.customer_notes (
   id uuid primary key default gen_random_uuid(),
   company_id uuid not null references public.companies(id) on delete cascade,
+  customer_name text not null default '',
   customer_email text not null,
   customer_phone text,
+  customer_key text generated always as (lower(customer_email)) stored,
   private_note text not null default '' check (length(private_note) <= 2000),
   updated_at timestamptz not null default now(),
   constraint customer_notes_company_email_unique unique (company_id, customer_email)
 );
+
+alter table public.customer_notes
+  add column if not exists customer_name text not null default '',
+  add column if not exists customer_key text generated always as (lower(customer_email)) stored;
 
 create index if not exists customer_notes_company_idx
   on public.customer_notes (company_id, customer_email);

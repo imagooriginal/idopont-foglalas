@@ -26,15 +26,48 @@ alter table public.companies
   add constraint companies_external_calendar_ics_url_length_check
   check (external_calendar_ics_url is null or length(external_calendar_ics_url) <= 1000);
 
+grant select (
+  google_review_url,
+  calendar_feed_token,
+  external_calendar_ics_url,
+  external_calendar_last_synced_at
+) on public.companies to authenticated;
+
+grant update (
+  google_review_url,
+  external_calendar_ics_url,
+  external_calendar_last_synced_at
+) on public.companies to authenticated;
+
+drop policy if exists "Owners and admins can update company integrations" on public.companies;
+create policy "Owners and admins can update company integrations"
+  on public.companies
+  for update
+  to authenticated
+  using (
+    owner_id = (select auth.uid())
+    or (select public.is_platform_admin())
+  )
+  with check (
+    owner_id = (select auth.uid())
+    or (select public.is_platform_admin())
+  );
+
 -- 2. Create company_staff table (Multi-Staff / Workstations)
 create table if not exists public.company_staff (
   id uuid primary key default gen_random_uuid(),
   company_id uuid not null references public.companies(id) on delete cascade,
   name text not null check (length(trim(name)) between 1 and 100),
   role_title text not null default '' check (length(role_title) <= 100),
+  email text default null,
+  color text not null default '#2563eb',
   is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
+
+alter table public.company_staff
+  add column if not exists email text default null,
+  add column if not exists color text not null default '#2563eb';
 
 create index if not exists company_staff_company_active_idx
   on public.company_staff (company_id, is_active);
@@ -96,6 +129,16 @@ create index if not exists bookings_review_queue_idx
 
 create index if not exists bookings_staff_idx
   on public.bookings (cég_id, staff_id, kezdes_ideje);
+
+grant insert, delete on public.manual_blockouts to authenticated;
+
+drop policy if exists "Owners and admins can manage blockouts" on public.manual_blockouts;
+create policy "Owners and admins can manage blockouts"
+  on public.manual_blockouts
+  for all
+  to authenticated
+  using ((select public.can_manage_company(manual_blockouts.cég_id)))
+  with check ((select public.can_manage_company(manual_blockouts.cég_id)));
 
 -- 4. Create audit_logs table (Eseménynapló)
 create table if not exists public.audit_logs (
