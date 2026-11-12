@@ -3,7 +3,12 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
-import { deliverBookingConfirmationEmail } from "@/lib/booking-emails";
+import {
+  deliverBookingConfirmationEmail,
+  deliverBookingRescheduledEmail,
+  deliverCustomerCancellationNoticeEmail,
+} from "@/lib/booking-emails";
+import { parseIcsEvents } from "@/lib/calendar";
 import { checkRateLimit, hashIdentifier, uuidSchema } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -1584,4 +1589,539 @@ export async function removeBlacklistEntryAction(
 
   revalidatePath("/dashboard");
   return { success: "A feketelistás tiltást feloldottuk." };
+}
+
+const providerRescheduleSchema = z.object({
+  companyId: uuidSchema,
+  bookingId: uuidSchema,
+  newStart: z
+    .string()
+    .trim()
+    .refine((val) => Number.isFinite(new Date(val).getTime()), {
+      message: "Érvénytelen új időpont.",
+    }),
+  staffId: z
+    .string()
+    .trim()
+    .optional()
+    .refine((val) => !val || uuidSchema.safeParse(val).success),
+});
+
+export async function rescheduleBookingByProviderAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = providerRescheduleSchema.safeParse({
+    companyId: String(formData.get("companyId") ?? ""),
+    bookingId: String(formData.get("bookingId") ?? ""),
+    newStart: String(
+      formData.get("newStart") ?? formData.get("startsAt") ?? "",
+    ),
+    staffId: String(formData.get("staffId") ?? "") || undefined,
+  });
+
+  if (!parsed.success) {
+    return {
+      error: "Adj meg érvényes foglalást és új kezdési időpontot.",
+    };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const newStartIso = new Date(parsed.data.newStart).toISOString();
+  const { data, error } = await supabase.rpc("reschedule_booking_by_provider", {
+    p_booking_id: parsed.data.bookingId,
+    p_new_start: newStartIso,
+    p_staff_id: parsed.data.staffId ?? null,
+  });
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError(
+        "A foglalás átütemezése nem sikerült",
+        error,
+      ),
+    };
+  }
+
+  const row = Array.isArray(data) ? data[0] : data;
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM_EMAIL;
+  if (apiKey && from && (row?.booking_id || parsed.data.bookingId)) {
+    try {
+      const admin = createSupabaseAdminClient();
+      await deliverBookingRescheduledEmail(
+        admin,
+        row?.booking_id ?? parsed.data.bookingId,
+        {
+          apiKey,
+          from,
+          initiatedBy: "provider",
+        },
+      );
+    } catch (emailErr) {
+      console.error("Provider reschedule email notification failed", emailErr);
+    }
+  }
+
+  revalidatePath("/dashboard");
+  return { success: "A foglalást sikeresen átütemeztük." };
+}
+
+const providerCancelSchema = z.object({
+  companyId: uuidSchema,
+  bookingId: uuidSchema,
+  reason: z.string().trim().max(300).default(""),
+});
+
+export async function cancelBookingByProviderAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = providerCancelSchema.safeParse({
+    companyId: String(formData.get("companyId") ?? ""),
+    bookingId: String(formData.get("bookingId") ?? ""),
+    reason: String(formData.get("reason") ?? ""),
+  });
+
+  if (!parsed.success) {
+    return { error: "Érvénytelen foglalás-azonosító." };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { data, error } = await supabase.rpc("cancel_booking_by_provider", {
+    p_booking_id: parsed.data.bookingId,
+    p_reason: parsed.data.reason || null,
+  });
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError("A foglalás lemondása nem sikerült", error),
+    };
+  }
+
+  const row = Array.isArray(data) ? data[0] : data;
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM_EMAIL;
+  if (apiKey && from && row?.customer_email) {
+    try {
+      await deliverCustomerCancellationNoticeEmail(
+        {
+          companyName: row.company_name || "Szolgáltató",
+          customerName: row.customer_name || "Ügyfél",
+          customerEmail: row.customer_email,
+          startsAt: row.starts_at,
+          endsAt: row.ends_at,
+          reason: parsed.data.reason || undefined,
+        },
+        { apiKey, from },
+      );
+    } catch (emailErr) {
+      console.error("Provider cancellation notice email failed", emailErr);
+    }
+  }
+
+  revalidatePath("/dashboard");
+  return { success: "A foglalást lemondtuk, az idősáv felszabadult." };
+}
+
+const staffCreateSchema = z.object({
+  companyId: uuidSchema,
+  name: z.string().trim().min(1).max(100),
+  roleTitle: z.string().trim().max(100).default(""),
+});
+
+export async function createStaffMemberAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = staffCreateSchema.safeParse({
+    companyId: String(formData.get("companyId") ?? ""),
+    name: String(formData.get("name") ?? ""),
+    roleTitle: String(formData.get("roleTitle") ?? ""),
+  });
+
+  if (!parsed.success) {
+    return {
+      error: "Adj meg érvényes munkatárs- vagy állásnevet (1–100 karakter).",
+    };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { error } = await supabase.from("company_staff").insert({
+    company_id: parsed.data.companyId,
+    name: parsed.data.name,
+    role_title: parsed.data.roleTitle,
+    is_active: true,
+  });
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError("A munkatárs hozzáadása nem sikerült", error),
+    };
+  }
+
+  revalidatePath("/dashboard");
+  return { success: "Az új munkatársat / állást hozzáadtuk." };
+}
+
+export async function toggleStaffMemberActiveAction(
+  companyId: string,
+  staffId: string,
+  isActive: boolean,
+  _previousState: ActionState,
+  _formData: FormData,
+): Promise<ActionState> {
+  void _previousState;
+  void _formData;
+  if (
+    !uuidSchema.safeParse(companyId).success ||
+    !uuidSchema.safeParse(staffId).success
+  ) {
+    return { error: "Érvénytelen munkatárs-azonosító." };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(supabase, companyId);
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { error } = await supabase
+    .from("company_staff")
+    .update({ is_active: isActive })
+    .eq("id", staffId)
+    .eq("company_id", companyId);
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError(
+        "A munkatárs státuszának módosítása nem sikerült",
+        error,
+      ),
+    };
+  }
+
+  revalidatePath("/dashboard");
+  return {
+    success: isActive
+      ? "A munkatárs újra aktív."
+      : "A munkatársat inaktiváltuk.",
+  };
+}
+
+export async function deleteStaffMemberAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = z
+    .object({
+      companyId: uuidSchema,
+      staffId: uuidSchema,
+    })
+    .safeParse({
+      companyId: formData.get("companyId"),
+      staffId: formData.get("staffId"),
+    });
+
+  if (!parsed.success) {
+    return { error: "Érvénytelen munkatárs-azonosító." };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { error } = await supabase
+    .from("company_staff")
+    .delete()
+    .eq("id", parsed.data.staffId)
+    .eq("company_id", parsed.data.companyId);
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError("A munkatárs törlése nem sikerült", error),
+    };
+  }
+
+  revalidatePath("/dashboard");
+  return { success: "A munkatársat töröltük." };
+}
+
+const integrationsSchema = z.object({
+  companyId: uuidSchema,
+  googleReviewUrl: z
+    .string()
+    .trim()
+    .max(500)
+    .refine(
+      (val) => !val || /^https:\/\/[^\s]+$/i.test(val),
+      "A Google értékelési linknek https://-sel kell kezdődnie.",
+    )
+    .default(""),
+  externalCalendarIcsUrl: z
+    .string()
+    .trim()
+    .max(1000)
+    .refine(
+      (val) => !val || /^(https|webcal):\/\/[^\s]+$/i.test(val),
+      "Az iCal naptár-URL-nek https:// vagy webcal:// előtaggal kell kezdődnie.",
+    )
+    .default(""),
+});
+
+export async function saveIntegrationsSettingsAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = integrationsSchema.safeParse({
+    companyId: String(formData.get("companyId") ?? ""),
+    googleReviewUrl: String(formData.get("googleReviewUrl") ?? ""),
+    externalCalendarIcsUrl: String(formData.get("externalCalendarIcsUrl") ?? ""),
+  });
+
+  if (!parsed.success) {
+    return {
+      error:
+        parsed.error.issues[0]?.message ??
+        "Ellenőrizd a megadott Google értékelési és naptár URL-eket.",
+    };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+    { requireProPlan: true },
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { error } = await supabase
+    .from("companies")
+    .update({
+      google_review_url: parsed.data.googleReviewUrl || null,
+      external_calendar_ics_url: parsed.data.externalCalendarIcsUrl || null,
+    })
+    .eq("id", parsed.data.companyId);
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError(
+        "Az integrációs beállítások mentése nem sikerült",
+        error,
+      ),
+    };
+  }
+
+  revalidatePath("/dashboard");
+  return {
+    success:
+      "A Google Calendar szinkron és az értékeléskérő e-mail beállításait elmentettük.",
+  };
+}
+
+export async function syncExternalGoogleCalendarAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const companyIdResult = uuidSchema.safeParse(formData.get("companyId"));
+  if (!companyIdResult.success) {
+    return { error: "Érvénytelen szolgáltató-azonosító." };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    companyIdResult.data,
+    { requireProPlan: true },
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { data: company } = await supabase
+    .from("companies")
+    .select("id, external_calendar_ics_url")
+    .eq("id", companyIdResult.data)
+    .maybeSingle();
+
+  const rawUrl = String(company?.external_calendar_ics_url ?? "").trim();
+  if (!rawUrl) {
+    return {
+      error:
+        "Először állíts be és ments el egy külső Google Calendar iCal (.ics) URL-t!",
+    };
+  }
+
+  const fetchUrl = rawUrl.replace(/^webcal:\/\//i, "https://");
+  try {
+    const parsedUrl = new URL(fetchUrl);
+    if (parsedUrl.protocol !== "https:") {
+      return { error: "Csak HTTPS alapú naptár-URL szinkronizálható." };
+    }
+  } catch {
+    return { error: "Érvénytelen naptár-URL." };
+  }
+
+  let icsText = "";
+  try {
+    const response = await fetch(fetchUrl, {
+      headers: { Accept: "text/calendar, text/plain, */*" },
+    });
+    if (!response.ok) {
+      return {
+        error: `A külső naptár letöltése nem sikerült (HTTP ${response.status}).`,
+      };
+    }
+    icsText = await response.text();
+  } catch {
+    return {
+      error: "A külső Google Calendar elérése sikertelen volt.",
+    };
+  }
+
+  const events = parseIcsEvents(icsText);
+  const now = Date.now();
+  const horizon = now + 60 * 24 * 60 * 60 * 1000;
+  const upcomingEvents = events.filter(
+    (ev) => ev.end.getTime() > now && ev.start.getTime() <= horizon,
+  );
+
+  let importedCount = 0;
+  for (const ev of upcomingEvents.slice(0, 50)) {
+    const note = `[GCal] ${ev.summary}`.slice(0, 200);
+    const { error: blockoutErr } = await supabase.rpc("add_manual_blockout", {
+      p_company_id: companyIdResult.data,
+      p_start: ev.start.toISOString(),
+      p_end: ev.end.toISOString(),
+      p_note: note,
+    });
+    if (!blockoutErr) {
+      importedCount += 1;
+    }
+  }
+
+  await supabase
+    .from("companies")
+    .update({ external_calendar_last_synced_at: new Date().toISOString() })
+    .eq("id", companyIdResult.data);
+
+  revalidatePath("/dashboard");
+  return {
+    success: `Google Naptár szinkron kész: ${importedCount} külső esemény blokkolva.`,
+  };
+}
+
+export async function requestPasswordResetAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const email = String(formData.get("email") ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 320) {
+    return { error: "Adj meg egy érvényes e-mail-címet." };
+  }
+
+  const emailHash = hashIdentifier(email);
+  const rateLimit = checkRateLimit("pwd_reset", emailHash, 3, 10 * 60 * 1000);
+  if (!rateLimit.allowed) {
+    return {
+      error:
+        "Túl sok jelszó-visszaállítási kérés. Kérlek, próbáld újra néhány perc múlva.",
+    };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const baseUrl = (
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    process.env.NEXT_PUBLIC_APP_URL ||
+    "http://localhost:3000"
+  ).replace(/\/+$/, "");
+
+  const authApi = supabase.auth as {
+    resetPasswordForEmail?: (
+      addr: string,
+      opts?: { redirectTo?: string },
+    ) => Promise<{ error: unknown }>;
+  };
+  if (typeof authApi.resetPasswordForEmail === "function") {
+    await authApi
+      .resetPasswordForEmail(email, {
+        redirectTo: `${baseUrl}/dashboard/reset-password`,
+      })
+      .catch(() => undefined);
+  }
+
+  return {
+    success:
+      "Ha a megadott e-mail-cím szerepel a rendszerben, elküldtük a jelszó-visszaállító linket.",
+  };
+}
+
+export async function updatePasswordAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const password = String(formData.get("password") ?? "");
+  const confirmPassword = String(formData.get("confirmPassword") ?? "");
+
+  if (password.length < 8 || password.length > 128) {
+    return {
+      error: "Az új jelszónak legalább 8 karakter hosszúnak kell lennie.",
+    };
+  }
+  if (password !== confirmPassword) {
+    return { error: "A két jelszó nem egyezik meg." };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const authApi = supabase.auth as {
+    updateUser?: (attrs: { password: string }) => Promise<{ error: { message?: string } | null }>;
+  };
+  if (typeof authApi.updateUser !== "function") {
+    return { error: "A jelszó módosítása jelenleg nem elérhető." };
+  }
+
+  const { error } = await authApi.updateUser({ password });
+  if (error) {
+    return {
+      error: "Az új jelszó mentése nem sikerült. Kérj új visszaállító linket.",
+    };
+  }
+
+  return {
+    success: "A jelszavad sikeresen frissült. Most már beléphetsz a Dashboardra.",
+  };
 }

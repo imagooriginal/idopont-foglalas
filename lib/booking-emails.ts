@@ -3,6 +3,7 @@ import { Resend } from "resend";
 import {
   createBookingEmailHtml,
   createGoogleCalendarUrl,
+  createGoogleReviewEmailHtml,
   createIcsCalendarFile,
   createReminderEmailHtml,
   sanitizeSingleLineText,
@@ -477,4 +478,225 @@ export async function deliverProviderCancellationNoticeEmail(
   );
 
   return { sent };
+}
+
+export async function deliverCustomerCancellationNoticeEmail(
+  details: {
+    companyName: string;
+    customerName: string;
+    customerEmail: string;
+    startsAt: string;
+    endsAt: string;
+    timeZone?: string;
+    reason?: string;
+  },
+  options: {
+    apiKey: string;
+    from: string;
+    timeoutMs?: number;
+  },
+): Promise<{ sent: boolean }> {
+  if (!details.customerEmail) {
+    return { sent: false };
+  }
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const timeZone = details.timeZone || "Europe/Budapest";
+  const start = new Date(details.startsAt);
+  const end = new Date(details.endsAt);
+  const startLabel = new Intl.DateTimeFormat("hu-HU", {
+    dateStyle: "full",
+    timeStyle: "short",
+    timeZone,
+  }).format(start);
+  const endLabel = new Intl.DateTimeFormat("hu-HU", {
+    dateStyle: "short",
+    timeStyle: "short",
+    timeZone,
+  }).format(end);
+
+  const resend = new Resend(options.apiKey);
+  const html = createBookingEmailHtml({
+    greeting: `Kedves ${sanitizeSingleLineText(details.customerName || "Ügyfelünk")}!`,
+    companyName: sanitizeSingleLineText(details.companyName),
+    serviceName: "Szolgáltató által lemondott időpont",
+    customerName: sanitizeSingleLineText(details.customerName || "Ügyfél"),
+    start: startLabel,
+    end: endLabel,
+    googleCalendarUrl: "https://calendar.google.com/calendar/render",
+    extraFields: details.reason ? [["Megjegyzés", details.reason]] : [],
+    introText:
+      "Értesítünk, hogy a szolgáltató lemondta az alábbi időpontot. Kérjük, válassz új időpontot a foglalóoldalon:",
+  });
+
+  const ics = createIcsCalendarFile({
+    title: `LEMONDVA – ${sanitizeSingleLineText(details.companyName)}`,
+    description: "A szolgáltató lemondta az időpontot.",
+    start,
+    end,
+  });
+
+  const sent = await sendSingleEmailWithTimeout(
+    resend,
+    options.from,
+    {
+      to: details.customerEmail,
+      subject: `Időpont lemondva (${sanitizeSingleLineText(details.companyName)})`,
+      html,
+      ics,
+    },
+    timeoutMs,
+  );
+
+  return { sent };
+}
+
+export async function deliverBookingRescheduledEmail(
+  admin: AdminClient,
+  bookingId: string,
+  options: {
+    apiKey: string;
+    from: string;
+    initiatedBy: "customer" | "provider";
+    timeoutMs?: number;
+  },
+): Promise<{ sent: boolean }> {
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const ctx = await buildBookingEmailContext(admin, bookingId);
+  const resend = new Resend(options.apiKey);
+  const recipients: BookingEmailMessage[] = [];
+
+  if (ctx.booking.ugyfel_email) {
+    recipients.push({
+      to: ctx.booking.ugyfel_email,
+      subject: `Időpont átütemezve (${ctx.safeCompanyName})`,
+      html: createBookingEmailHtml({
+        greeting: `Kedves ${ctx.safeCustomerName}!`,
+        companyName: ctx.safeCompanyName,
+        serviceName: ctx.serviceName,
+        customerName: ctx.safeCustomerName,
+        start: ctx.startLabel,
+        end: ctx.endLabel,
+        googleCalendarUrl: ctx.googleCalendarUrl,
+        extraFields: ctx.extraFields,
+        cancellationUrl: ctx.cancellationUrl,
+        introText:
+          options.initiatedBy === "provider"
+            ? "A szolgáltató módosította a foglalásod időpontját. Az új időpont részletei:"
+            : "Sikeresen átütemezted a foglalásodat. Az új időpont részletei:",
+      }),
+      ics: ctx.ics,
+    });
+  }
+
+  if (ctx.company.owner_id) {
+    const { data: ownerResult } = await admin.auth.admin.getUserById(
+      ctx.company.owner_id,
+    );
+    const ownerEmail = ownerResult?.user?.email;
+    if (ownerEmail) {
+      recipients.push({
+        to: ownerEmail,
+        subject: `Átütemezett foglalás: ${ctx.safeCustomerName}`,
+        html: createBookingEmailHtml({
+          greeting: `Átütemezett foglalás: ${ctx.safeCustomerName}`,
+          companyName: ctx.safeCompanyName,
+          serviceName: ctx.serviceName,
+          customerName: ctx.safeCustomerName,
+          start: ctx.startLabel,
+          end: ctx.endLabel,
+          googleCalendarUrl: ctx.googleCalendarUrl,
+          extraFields: ctx.extraFields,
+          introText: "A foglalás új időpontra került:",
+        }),
+        ics: ctx.ics,
+      });
+    }
+  }
+
+  const results = await Promise.all(
+    recipients.map((msg) =>
+      sendSingleEmailWithTimeout(resend, options.from, msg, timeoutMs),
+    ),
+  );
+  return { sent: results.some(Boolean) };
+}
+
+export async function deliverGoogleReviewEmail(
+  admin: AdminClient,
+  bookingId: string,
+  options: {
+    apiKey: string;
+    from: string;
+    timeoutMs?: number;
+  },
+): Promise<{ sent: boolean }> {
+  const timeoutMs = options.timeoutMs ?? 8000;
+  const { data: booking } = await admin
+    .from("bookings")
+    .select("*")
+    .eq("id", bookingId)
+    .eq("status", "confirmed")
+    .maybeSingle();
+
+  if (!booking || !booking.ugyfel_email) {
+    return { sent: false };
+  }
+
+  const { data: company } = await admin
+    .from("companies")
+    .select("id, nev, plan, google_review_url")
+    .eq("id", booking.cég_id)
+    .maybeSingle();
+
+  if (
+    !company ||
+    company.plan !== "pro" ||
+    !company.google_review_url ||
+    !String(company.google_review_url).trim()
+  ) {
+    return { sent: false };
+  }
+
+  const { data: service } = await admin
+    .from("services")
+    .select("nev")
+    .eq("id", booking.service_id)
+    .maybeSingle();
+
+  const resend = new Resend(options.apiKey);
+  const html = createGoogleReviewEmailHtml({
+    customerName: booking.ugyfel_nev || "Ügyfelünk",
+    companyName: company.nev,
+    serviceName: service?.nev || "Szolgáltatás",
+    reviewUrl: String(company.google_review_url).trim(),
+  });
+
+  try {
+    const { error } = await withTimeout(
+      resend.emails.send({
+        from: options.from,
+        to: [booking.ugyfel_email],
+        subject: `Hogy tetszett a szolgáltatás? (${sanitizeSingleLineText(company.nev)})`,
+        html,
+      }),
+      timeoutMs,
+      "Google review email timed out",
+    );
+
+    if (error) {
+      return { sent: false };
+    }
+
+    await admin
+      .from("bookings")
+      .update({
+        review_email_sent: true,
+        review_email_sent_at: new Date().toISOString(),
+      })
+      .eq("id", bookingId);
+
+    return { sent: true };
+  } catch {
+    return { sent: false };
+  }
 }

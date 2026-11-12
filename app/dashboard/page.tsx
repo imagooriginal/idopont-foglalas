@@ -3,15 +3,19 @@ import { redirect } from "next/navigation";
 import { connection } from "next/server";
 import { signOutAction } from "./actions";
 import BlockoutManager from "./BlockoutManager";
+import BookingActionsControl, { type StaffOption } from "./BookingActionsControl";
 import BusinessHoursManager from "./BusinessHoursManager";
 import ManualBookingManager from "./ManualBookingManager";
 import PremiumFeaturesSection, {
+  type AuditLogItem,
   type BlacklistEntryItem,
   type CustomerHistorySummary,
   type CustomerNoteItem,
   type MonthlyPremiumStats,
 } from "./PremiumFeaturesSection";
+import StaffManager from "./StaffManager";
 import TenantServiceManager from "./TenantServiceManager";
+import VisualCalendarView from "./VisualCalendarView";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import { getSupabasePublicConfig } from "@/lib/supabase/config";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -323,7 +327,7 @@ export default async function DashboardPage({
   const { data: companies, error: companiesError } = await supabase
     .from("companies")
     .select(
-      "id, nev, slug, status, plan, time_zone, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, nyitvatartas_kezdet, nyitvatartas_vege",
+      "id, nev, slug, status, plan, time_zone, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, nyitvatartas_kezdet, nyitvatartas_vege, google_review_url, calendar_feed_token, external_calendar_ics_url, external_calendar_last_synced_at",
     )
     .eq("owner_id", userData.user.id);
 
@@ -385,7 +389,7 @@ export default async function DashboardPage({
     supabase
       .from("bookings")
       .select(
-        "id, service_id, ugyfel_nev, ugyfel_email, ugyfel_telefon, jarmu_marka, jarmu_modell, jarmu_rendszam, custom_fields, kezdes_ideje, vege_ideje",
+        "id, service_id, staff_id, ugyfel_nev, ugyfel_email, ugyfel_telefon, jarmu_marka, jarmu_modell, jarmu_rendszam, custom_fields, kezdes_ideje, vege_ideje",
       )
       .eq("cég_id", company.id)
       .eq("status", "confirmed")
@@ -481,6 +485,35 @@ export default async function DashboardPage({
   let notesList: CustomerNoteItem[] = [];
   let blacklistEntries: BlacklistEntryItem[] = [];
   let customerHistory: CustomerHistorySummary[] = [];
+  let staffMembers: StaffOption[] = [];
+  let auditLogs: AuditLogItem[] = [];
+
+  try {
+    const staffRes = await supabase
+      .from("company_staff")
+      .select("id, name, role_title, email, color, is_active")
+      .eq("company_id", company.id)
+      .order("created_at", { ascending: true });
+    if (Array.isArray(staffRes?.data)) {
+      staffMembers = staffRes.data as StaffOption[];
+    }
+  } catch {
+    staffMembers = [];
+  }
+
+  try {
+    const auditRes = await supabase
+      .from("audit_logs")
+      .select("id, action, entity_type, created_at, details")
+      .eq("company_id", company.id)
+      .order("created_at", { ascending: false })
+      .limit(20);
+    if (Array.isArray(auditRes?.data)) {
+      auditLogs = auditRes.data as AuditLogItem[];
+    }
+  } catch {
+    auditLogs = [];
+  }
 
   if (companyPlan === "pro") {
     const monthStartIso = `${today.slice(0, 7)}-01T00:00:00.000Z`;
@@ -780,6 +813,12 @@ export default async function DashboardPage({
                           </td>
                           <td className="px-6 py-4">
                             <BookingStatusBadge />
+                            <BookingActionsControl
+                              bookingId={booking.id}
+                              companyId={company.id}
+                              currentStaffId={(booking as { staff_id?: string | null }).staff_id ?? null}
+                              staffOptions={staffMembers}
+                            />
                           </td>
                         </tr>
                       ))}
@@ -837,6 +876,12 @@ export default async function DashboardPage({
                           )}
                         </div>
                       </dl>
+                      <BookingActionsControl
+                        bookingId={booking.id}
+                        companyId={company.id}
+                        currentStaffId={(booking as { staff_id?: string | null }).staff_id ?? null}
+                        staffOptions={staffMembers}
+                      />
                     </li>
                   ))}
                 </ul>
@@ -850,11 +895,34 @@ export default async function DashboardPage({
             timeZone={timeZone}
           />
         </div>
+        <VisualCalendarView
+          blockouts={blockouts.map((bl) => ({
+            id: bl.id,
+            startsAt: bl.kezdes_ideje,
+            endsAt: bl.vege_ideje,
+            note: bl.megjegyzes,
+          }))}
+          bookings={bookings.map((b) => ({
+            id: b.id,
+            customerName: b.ugyfel_nev || "Ügyfél",
+            serviceName:
+              serviceNamesByBooking.get(b.id)?.join(" + ") ||
+              serviceNames.get(b.service_id) ||
+              "Szolgáltatás",
+            staffId: (b as { staff_id?: string | null }).staff_id ?? null,
+            startsAt: b.kezdes_ideje,
+            endsAt: b.vege_ideje,
+          }))}
+          staff={staffMembers}
+          timeZone={timeZone}
+          todayDate={today}
+        />
         <ManualBookingManager
           companyId={company.id}
           services={servicesResult.data ?? []}
           timeZone={timeZone}
         />
+        <StaffManager companyId={company.id} staff={staffMembers} />
         <BusinessHoursManager
           companyId={company.id}
           hours={businessHoursResult.data ?? []}
@@ -870,10 +938,15 @@ export default async function DashboardPage({
           />
         )}
         <PremiumFeaturesSection
+          auditLogs={auditLogs}
           blacklist={blacklistEntries}
+          calendarFeedToken={(company as { calendar_feed_token?: string | null }).calendar_feed_token ?? null}
           companyId={company.id}
           customFieldsCount={customFieldLabels.size}
           customerHistory={customerHistory}
+          externalCalendarIcsUrl={(company as { external_calendar_ics_url?: string | null }).external_calendar_ics_url ?? null}
+          externalCalendarLastSyncedAt={(company as { external_calendar_last_synced_at?: string | null }).external_calendar_last_synced_at ?? null}
+          googleReviewUrl={(company as { google_review_url?: string | null }).google_review_url ?? null}
           notes={notesList}
           plan={companyPlan}
           recentBookings={bookings.map((b) => ({

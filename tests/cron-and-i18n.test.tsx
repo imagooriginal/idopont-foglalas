@@ -113,7 +113,9 @@ describe("Cron Jobs (24h Reminders, Outbox Retry, GC & GDPR Retention) and One-C
                       data:
                         callNum === 1
                           ? [{ id: "booking-outbox-1" }]
-                          : [{ id: "booking-reminder-1" }],
+                          : callNum === 2
+                            ? [{ id: "booking-reminder-1" }]
+                            : [],
                       error: null,
                     }),
                   }),

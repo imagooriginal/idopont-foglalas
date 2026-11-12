@@ -1,6 +1,7 @@
 import {
   deliverBookingConfirmationEmail,
   deliverBookingReminderEmail,
+  deliverGoogleReviewEmail,
   verifyCronAuthorization,
 } from "@/lib/booking-emails";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -95,11 +96,52 @@ export async function GET(request: Request) {
     }
   }
 
+  // 3. Automated Post-Appointment Google Review Emails (2 to 24 hours after end time)
+  const twoHoursAgoIso = new Date(
+    now.getTime() - 2 * 60 * 60 * 1000,
+  ).toISOString();
+  const twentyFourHoursAgoIso = new Date(
+    now.getTime() - 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  let reviewsProcessed = 0;
+  let reviewsSent = 0;
+  try {
+    const { data: dueReviews, error: reviewError } = await admin
+      .from("bookings")
+      .select("id")
+      .eq("status", "confirmed")
+      .eq("review_email_sent", false)
+      .gte("vege_ideje", twentyFourHoursAgoIso)
+      .lte("vege_ideje", twoHoursAgoIso)
+      .order("vege_ideje", { ascending: true })
+      .limit(30);
+
+    if (!reviewError && Array.isArray(dueReviews)) {
+      reviewsProcessed = dueReviews.length;
+      for (const item of dueReviews) {
+        try {
+          const { sent } = await deliverGoogleReviewEmail(admin, item.id, {
+            apiKey,
+            from,
+            timeoutMs: 8000,
+          });
+          if (sent) reviewsSent += 1;
+        } catch (error) {
+          console.error(`Review email failed for booking ${item.id}`, error);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Review queue processing skipped or failed", error);
+  }
+
   return Response.json({
     ok: true,
     outboxProcessed: (pendingConfirmations ?? []).length,
     outboxSent,
     remindersProcessed: (dueReminders ?? []).length,
     remindersSent,
+    ...(reviewsProcessed > 0 ? { reviewsProcessed, reviewsSent } : {}),
   });
 }

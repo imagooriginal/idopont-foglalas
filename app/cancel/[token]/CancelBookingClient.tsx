@@ -27,7 +27,10 @@ export default function CancelBookingClient({
 }: CancelBookingClientProps) {
   const { t } = useLanguage();
   const [cancelled, setCancelled] = useState(isAlreadyCancelled);
+  const [rescheduledTo, setRescheduledTo] = useState("");
+  const [newStartLocal, setNewStartLocal] = useState("");
   const [loading, setLoading] = useState(false);
+  const [rescheduling, setRescheduling] = useState(false);
   const [error, setError] = useState("");
 
   async function handleCancel() {
@@ -64,12 +67,59 @@ export default function CancelBookingClient({
     }
   }
 
+  async function handleReschedule(event: React.FormEvent) {
+    event.preventDefault();
+    if (!newStartLocal) return;
+    setRescheduling(true);
+    setError("");
+    try {
+      const isoStart = new Date(newStartLocal).toISOString();
+      const response = await fetch("/api/bookings/reschedule", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, newStart: isoStart }),
+      });
+      const result = (await response.json()) as {
+        error?: string;
+        startsAt?: string;
+      };
+      if (!response.ok) {
+        throw new Error(
+          result.error ||
+            t(
+              "Az időpont átütemezése nem sikerült.",
+              "Could not reschedule the appointment.",
+            ),
+        );
+      }
+      const formattedNew = new Intl.DateTimeFormat("hu-HU", {
+        dateStyle: "full",
+        timeStyle: "short",
+      }).format(new Date(result.startsAt || isoStart));
+      setRescheduledTo(formattedNew);
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : t(
+              "Az időpont átütemezése nem sikerült.",
+              "Could not reschedule the appointment.",
+            ),
+      );
+    } finally {
+      setRescheduling(false);
+    }
+  }
+
   return (
     <section className="mx-auto w-full max-w-xl rounded-2xl border border-slate-200 bg-white p-6 shadow-lg sm:p-8">
       <div className="mb-6 flex items-start justify-between gap-4 border-b border-slate-100 pb-4">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-blue-700">
-            {t("Online időpont-lemondás", "Online Appointment Cancellation")}
+            {t(
+              "Online időpont-kezelés (Átütemezés / Lemondás)",
+              "Online Appointment Management (Reschedule / Cancel)",
+            )}
           </p>
           <h1 className="mt-1 text-2xl font-bold text-slate-950">
             {companyName}
@@ -95,7 +145,9 @@ export default function CancelBookingClient({
           <dt className="font-medium text-slate-500">
             {t("Időpont", "Appointment Time")}
           </dt>
-          <dd className="font-semibold text-slate-900">{startsAtFormatted}</dd>
+          <dd className="font-semibold text-slate-900">
+            {rescheduledTo || startsAtFormatted}
+          </dd>
         </div>
       </dl>
 
@@ -106,6 +158,18 @@ export default function CancelBookingClient({
         >
           {error}
         </p>
+      )}
+
+      {rescheduledTo && (
+        <div
+          className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-medium text-emerald-900"
+          role="status"
+        >
+          {t(
+            `Az időpontot sikeresen átütemezted erre: ${rescheduledTo}. Küldtünk egy frissített visszaigazoló e-mailt.`,
+            `Your appointment has been rescheduled to: ${rescheduledTo}. An updated confirmation email has been sent.`,
+          )}
+        </div>
       )}
 
       {cancelled ? (
@@ -139,23 +203,65 @@ export default function CancelBookingClient({
           )}
         </div>
       ) : (
-        <div className="mt-6 space-y-3">
-          <p className="text-sm text-slate-600">
-            {t(
-              "Biztosan szeretnéd lemondani a fenti időpontot? A művelet nem vonható vissza.",
-              "Are you sure you want to cancel this appointment? This action cannot be undone.",
-            )}
-          </p>
-          <button
-            className="w-full rounded-xl bg-red-600 px-4 py-3 font-semibold text-white shadow-sm transition hover:bg-red-700 disabled:opacity-60"
-            disabled={loading}
-            onClick={() => void handleCancel()}
-            type="button"
+        <div className="mt-6 space-y-6">
+          {/* Customer Reschedule Option */}
+          <form
+            className="space-y-3 rounded-xl border border-blue-100 bg-blue-50/60 p-4"
+            onSubmit={handleReschedule}
           >
-            {loading
-              ? t("Lemondás folyamatban...", "Cancelling...")
-              : t("Időpont lemondása", "Cancel Appointment")}
-          </button>
+            <h2 className="text-sm font-bold text-slate-900">
+              {t(
+                "Másik időpontot szeretnél? (Átütemezés)",
+                "Prefer another time? (Reschedule)",
+              )}
+            </h2>
+            <p className="text-xs text-slate-600">
+              {t(
+                "A lemondás helyett 1 kattintással átteheted a foglalásodat egy másik szabad időpontra:",
+                "Instead of cancelling, move your appointment to another available slot:",
+              )}
+            </p>
+            <label className="block space-y-1 text-xs font-semibold text-slate-700">
+              {t("Új időpont kiválasztása", "Select New Date & Time")}
+              <input
+                aria-label={t("Új időpont kiválasztása", "Select New Date & Time")}
+                className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-normal text-slate-900"
+                onChange={(e) => setNewStartLocal(e.target.value)}
+                required
+                type="datetime-local"
+                value={newStartLocal}
+              />
+            </label>
+            <button
+              className="w-full rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800 disabled:opacity-60"
+              disabled={rescheduling || !newStartLocal}
+              type="submit"
+            >
+              {rescheduling
+                ? t("Átütemezés...", "Rescheduling...")
+                : t("Időpont átütemezése", "Reschedule Appointment")}
+            </button>
+          </form>
+
+          {/* Customer Cancel Option */}
+          <div className="space-y-3 border-t border-slate-100 pt-4">
+            <p className="text-sm text-slate-600">
+              {t(
+                "Biztosan szeretnéd lemondani a fenti időpontot? A művelet nem vonható vissza.",
+                "Are you sure you want to cancel this appointment? This action cannot be undone.",
+              )}
+            </p>
+            <button
+              className="w-full rounded-xl bg-red-600 px-4 py-3 font-semibold text-white shadow-sm transition hover:bg-red-700 disabled:opacity-60"
+              disabled={loading}
+              onClick={() => void handleCancel()}
+              type="button"
+            >
+              {loading
+                ? t("Lemondás folyamatban...", "Cancelling...")
+                : t("Időpont lemondása", "Cancel Appointment")}
+            </button>
+          </div>
         </div>
       )}
     </section>

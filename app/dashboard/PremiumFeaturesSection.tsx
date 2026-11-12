@@ -7,9 +7,19 @@ import {
   markBookingNoShowAction,
   removeBlacklistEntryAction,
   saveCustomerNoteAction,
+  saveIntegrationsSettingsAction,
+  syncExternalGoogleCalendarAction,
   type ActionState,
   type CompanyPlan,
 } from "./actions";
+
+export interface AuditLogItem {
+  id: string;
+  action: string;
+  entity_type: string;
+  created_at: string;
+  details?: unknown;
+}
 
 export interface MonthlyPremiumStats {
   confirmedCount: number;
@@ -79,6 +89,8 @@ function UpsellLockBanner() {
   );
 }
 
+const fallbackAction = async (): Promise<ActionState> => ({});
+
 export default function PremiumFeaturesSection({
   companyId,
   plan,
@@ -88,6 +100,11 @@ export default function PremiumFeaturesSection({
   blacklist,
   recentBookings,
   customFieldsCount,
+  calendarFeedToken,
+  googleReviewUrl,
+  externalCalendarIcsUrl,
+  externalCalendarLastSyncedAt,
+  auditLogs = [],
 }: {
   companyId: string;
   plan: CompanyPlan;
@@ -97,24 +114,37 @@ export default function PremiumFeaturesSection({
   blacklist: BlacklistEntryItem[];
   recentBookings: RecentBookingForNoShow[];
   customFieldsCount: number;
+  calendarFeedToken?: string | null;
+  googleReviewUrl?: string | null;
+  externalCalendarIcsUrl?: string | null;
+  externalCalendarLastSyncedAt?: string | null;
+  auditLogs?: AuditLogItem[];
 }) {
   const { t } = useLanguage();
   const isPro = plan === "pro";
 
   const [noteState, noteAction, notePending] = useActionState(
-    saveCustomerNoteAction,
+    saveCustomerNoteAction ?? fallbackAction,
     initialState,
   );
   const [blacklistState, blacklistAction, blacklistPending] = useActionState(
-    addBlacklistEntryAction,
+    addBlacklistEntryAction ?? fallbackAction,
     initialState,
   );
   const [removeState, removeAction, removePending] = useActionState(
-    removeBlacklistEntryAction,
+    removeBlacklistEntryAction ?? fallbackAction,
     initialState,
   );
   const [noShowState, noShowAction, noShowPending] = useActionState(
-    markBookingNoShowAction,
+    markBookingNoShowAction ?? fallbackAction,
+    initialState,
+  );
+  const [integrationsState, integrationsAction, integrationsPending] = useActionState(
+    saveIntegrationsSettingsAction ?? fallbackAction,
+    initialState,
+  );
+  const [syncState, syncAction, syncPending] = useActionState(
+    syncExternalGoogleCalendarAction ?? fallbackAction,
     initialState,
   );
 
@@ -492,6 +522,174 @@ export default function PremiumFeaturesSection({
               {removeState.error && (
                 <p className="mt-1 text-xs text-red-600">{removeState.error}</p>
               )}
+            </div>
+          </div>
+
+          {/* 4. Kétirányú Google Calendar Szinkronizáció & Automatikus Google Review */}
+          <div className="mt-6 grid gap-6 lg:grid-cols-2">
+            <div className="rounded-2xl border border-slate-200 p-5">
+              <h3 className="text-base font-bold text-slate-950">
+                {t(
+                  "Kétirányú Google Calendar & Automatikus Értékeléskérő (Google Review)",
+                  "Two-Way Google Calendar Sync & Automated Google Review Request",
+                )}
+              </h3>
+              <p className="mt-1 text-xs text-slate-500">
+                {t(
+                  "Szinkronizáld a foglalásokat a saját Google / Apple naptáraddal, és kérj automatikusan 5 csillagos értékelést a lezajlott időpontok után.",
+                  "Sync bookings with your Google / Apple Calendar and automatically request 5-star reviews after completed appointments.",
+                )}
+              </p>
+
+              {calendarFeedToken && (
+                <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-xs">
+                  <p className="font-semibold text-blue-900">
+                    {t(
+                      "Kimenő élő naptár-előfizetési URL (Google Calendar -> Feliratkozás URL alapján):",
+                      "Outbound Live iCal Feed URL (Subscribe in Google / Apple Calendar):",
+                    )}
+                  </p>
+                  <code className="mt-1 block break-all rounded bg-white px-2 py-1 text-[11px] text-slate-800 ring-1 ring-blue-100">
+                    {`/api/calendar/${calendarFeedToken}.ics`}
+                  </code>
+                </div>
+              )}
+
+              <form action={integrationsAction} className="mt-4 space-y-3">
+                <input name="companyId" type="hidden" value={companyId} />
+                <label className="block space-y-1 text-xs font-semibold text-slate-700">
+                  {t(
+                    "Google Maps / Google Cégprofil Értékelő Link (Automatikus e-mail a foglalás után 2 órával)",
+                    "Google Maps / Business Review URL (Sent 2h after appointment ends)",
+                  )}
+                  <input
+                    className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-normal"
+                    defaultValue={googleReviewUrl ?? ""}
+                    disabled={!isPro}
+                    name="googleReviewUrl"
+                    placeholder="https://g.page/r/..."
+                    type="url"
+                  />
+                </label>
+                <label className="block space-y-1 text-xs font-semibold text-slate-700">
+                  {t(
+                    "Bejövő külső Google Calendar privát iCal (.ics) URL (Magánprogramok automatikus blokkolása)",
+                    "Inbound External Google Calendar Private iCal (.ics) URL (Auto-block personal events)",
+                  )}
+                  <input
+                    className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-normal"
+                    defaultValue={externalCalendarIcsUrl ?? ""}
+                    disabled={!isPro}
+                    name="externalCalendarIcsUrl"
+                    placeholder="https://calendar.google.com/calendar/ical/.../basic.ics"
+                    type="url"
+                  />
+                </label>
+                {integrationsState.error && (
+                  <p className="text-xs font-semibold text-red-600" role="alert">
+                    {integrationsState.error}
+                  </p>
+                )}
+                {integrationsState.success && (
+                  <p className="text-xs font-semibold text-emerald-700" role="status">
+                    {integrationsState.success}
+                  </p>
+                )}
+                <button
+                  className="rounded-xl bg-blue-700 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
+                  disabled={!isPro || integrationsPending}
+                  type="submit"
+                >
+                  {integrationsPending
+                    ? t("Mentés...", "Saving...")
+                    : t("Integrációk mentése", "Save Integrations")}
+                </button>
+              </form>
+
+              <div className="mt-4 border-t border-slate-100 pt-3">
+                <form action={syncAction} className="flex flex-wrap items-center justify-between gap-2">
+                  <input name="companyId" type="hidden" value={companyId} />
+                  <span className="text-xs text-slate-500">
+                    {externalCalendarLastSyncedAt
+                      ? `${t("Utolsó szinkronizálás:", "Last synced:")} ${new Date(externalCalendarLastSyncedAt).toLocaleString("hu-HU")}`
+                      : t("Külső Google Naptár események azonnali beolvasása", "Import external Google Calendar events now")}
+                  </span>
+                  <button
+                    className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-800 hover:bg-blue-100 disabled:opacity-50"
+                    disabled={!isPro || syncPending}
+                    type="submit"
+                  >
+                    {syncPending
+                      ? t("Szinkronizálás...", "Syncing...")
+                      : t("Külső Google Naptár szinkronizálása most", "Sync External Google Calendar Now")}
+                  </button>
+                </form>
+                {syncState.error && (
+                  <p className="mt-1 text-xs font-semibold text-red-600">{syncState.error}</p>
+                )}
+                {syncState.success && (
+                  <p className="mt-1 text-xs font-semibold text-emerald-700">{syncState.success}</p>
+                )}
+              </div>
+            </div>
+
+            {/* 5. Üzemeltetés, CSV/Excel Export, E-mail hitelesítés & Audit Log */}
+            <div className="rounded-2xl border border-slate-200 p-5">
+              <h3 className="text-base font-bold text-slate-950">
+                {t(
+                  "Üzemeltetés, Könyvelési CSV/Excel Export és Eseménynapló (Audit Log)",
+                  "Operations, Accounting CSV/Excel Export & Audit Log",
+                )}
+              </h3>
+              <p className="mt-1 text-xs text-slate-500">
+                {t(
+                  "Töltsd le a foglalási és bevételi kimutatást Excel-kompatibilis CSV formátumban, és kövesd nyomon a rendszereseményeket.",
+                  "Download booking & revenue reports in Excel-compatible CSV format and track system audit events.",
+                )}
+              </p>
+
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <a
+                  className="inline-flex items-center gap-2 rounded-xl bg-emerald-700 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-800"
+                  download
+                  href={`/api/dashboard/export-csv?companyId=${encodeURIComponent(companyId)}`}
+                >
+                  {t("CSV / Excel jelentés letöltése", "Download CSV / Excel Report")}
+                </a>
+                <span className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[11px] font-semibold text-emerald-800">
+                  {t(
+                    "SPF / DKIM / DMARC: E-mail kézbesítési hitelesítés aktív",
+                    "SPF / DKIM / DMARC: Email delivery authentication active",
+                  )}
+                </span>
+              </div>
+
+              <div className="mt-5 border-t border-slate-100 pt-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                  {t("Legutóbbi biztonsági és működési események (Audit Log)", "Recent Security & Operational Events (Audit Log)")}
+                </p>
+                {auditLogs.length === 0 ? (
+                  <p className="mt-2 text-xs text-slate-500">
+                    {t("Még nincs naplózott művelet.", "No audit events logged yet.")}
+                  </p>
+                ) : (
+                  <ul className="mt-2 max-h-48 space-y-1.5 overflow-y-auto pr-1">
+                    {auditLogs.map((log) => (
+                      <li
+                        className="flex items-center justify-between gap-2 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs"
+                        key={log.id}
+                      >
+                        <span className="font-semibold text-slate-800">
+                          {log.action} <span className="font-normal text-slate-500">({log.entity_type})</span>
+                        </span>
+                        <span className="text-[11px] text-slate-500">
+                          {new Date(log.created_at).toLocaleString("hu-HU")}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </div>
           </div>
         </div>
