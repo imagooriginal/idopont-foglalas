@@ -111,7 +111,9 @@ async function buildBookingEmailContext(admin: AdminClient, bookingId: string) {
   const [companyResult, bookingServicesResult] = await Promise.all([
     admin
       .from("companies")
-      .select("id, nev, slug, owner_id, time_zone, plan, custom_booking_fields")
+      .select(
+        "id, nev, slug, owner_id, time_zone, plan, custom_booking_fields, cancellation_window_hours",
+      )
       .eq("id", booking.cég_id)
       .single(),
     admin
@@ -230,6 +232,13 @@ async function buildBookingEmailContext(admin: AdminClient, bookingId: string) {
   const ics = createIcsCalendarFile(calendarEvent);
   const companyPlan =
     (companyResult.data as { plan?: string }).plan ?? "pro";
+  const rawCancellationWindow = (
+    companyResult.data as { cancellation_window_hours?: number | null }
+  ).cancellation_window_hours;
+  const cancellationWindowHours =
+    typeof rawCancellationWindow === "number" && Number.isFinite(rawCancellationWindow)
+      ? Math.max(0, Math.floor(rawCancellationWindow))
+      : 24;
   const siteBase = (
     process.env.NEXT_PUBLIC_SITE_URL || "https://idopontfoglalo.hu"
   ).replace(/\/+$/, "");
@@ -243,8 +252,10 @@ async function buildBookingEmailContext(admin: AdminClient, bookingId: string) {
     company: companyResult.data as typeof companyResult.data & {
       plan?: string;
       slug?: string;
+      cancellation_window_hours?: number;
     },
     companyPlan,
+    cancellationWindowHours,
     cancellationUrl,
     serviceName,
     extraFields,
@@ -293,6 +304,7 @@ export async function deliverBookingConfirmationEmail(
         googleCalendarUrl: ctx.googleCalendarUrl,
         extraFields: ctx.extraFields,
         cancellationUrl: ctx.cancellationUrl,
+        cancellationWindowHours: ctx.cancellationWindowHours,
       }),
       ics: ctx.ics,
     });
@@ -372,6 +384,7 @@ export async function deliverBookingReminderEmail(
       googleCalendarUrl: ctx.googleCalendarUrl,
       extraFields: ctx.extraFields,
       cancellationUrl: ctx.cancellationUrl,
+      cancellationWindowHours: ctx.cancellationWindowHours,
     }),
     ics: ctx.ics,
   };
@@ -579,6 +592,7 @@ export async function deliverBookingRescheduledEmail(
         googleCalendarUrl: ctx.googleCalendarUrl,
         extraFields: ctx.extraFields,
         cancellationUrl: ctx.cancellationUrl,
+        cancellationWindowHours: ctx.cancellationWindowHours,
         introText:
           options.initiatedBy === "provider"
             ? "A szolgáltató módosította a foglalásod időpontját. Az új időpont részletei:"

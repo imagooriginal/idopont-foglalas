@@ -60,11 +60,12 @@ export async function POST(request: Request) {
 
   if (error) {
     const msg = error.message ?? "";
-    if (msg.includes("more than 24 hours")) {
+    const hoursMatch = /more than (\d+) hours/i.exec(msg);
+    if (hoursMatch) {
+      const hours = Number.parseInt(hoursMatch[1], 10);
       return Response.json(
         {
-          error:
-            "24 órán belüli időpont online már nem ütemezhető át. Kérjük, vedd fel a kapcsolatot közvetlenül a szolgáltatóval telefonon!",
+          error: `${hours} órán belüli időpont online már nem ütemezhető át. Kérjük, vedd fel a kapcsolatot közvetlenül a szolgáltatóval telefonon!`,
           code: "WITHIN_24_HOURS",
         },
         { status: 400 },

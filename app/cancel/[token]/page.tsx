@@ -60,7 +60,7 @@ export default async function CancelBookingPage({
   const [{ data: company }, { data: service }] = await Promise.all([
     admin
       .from("companies")
-      .select("id, nev, plan, time_zone")
+      .select("id, nev, plan, time_zone, cancellation_window_hours")
       .eq("id", booking.cég_id)
       .maybeSingle(),
     admin
@@ -81,17 +81,25 @@ export default async function CancelBookingPage({
     timeStyle: "short",
     timeZone,
   }).format(startsAt);
-  const isWithin24Hours =
-    startsAt.getTime() <= Date.now() + 24 * 60 * 60 * 1000;
+  const rawWindowHours = (
+    company as { cancellation_window_hours?: number | null }
+  ).cancellation_window_hours;
+  const cancellationWindowHours =
+    typeof rawWindowHours === "number" && Number.isFinite(rawWindowHours)
+      ? Math.max(0, Math.min(168, Math.floor(rawWindowHours)))
+      : 24;
+  const isWithinCutoff =
+    startsAt.getTime() <= Date.now() + cancellationWindowHours * 60 * 60 * 1000;
 
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-12 sm:px-6">
       <CancelBookingClient
+        cancellationWindowHours={cancellationWindowHours}
         companyName={company.nev}
         customerName={booking.ugyfel_nev || "Ügyfél"}
         isAlreadyCancelled={booking.status !== "confirmed"}
         isProCompany={company.plan === "pro"}
-        isWithin24Hours={isWithin24Hours}
+        isWithin24Hours={isWithinCutoff}
         serviceName={service?.nev || "Szolgáltatás"}
         startsAtFormatted={startsAtFormatted}
         token={parsedToken.data}

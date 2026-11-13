@@ -84,6 +84,8 @@ const tenantBaseSchema = z
       .max(100)
       .refine((val) => isValidTimeZone(val)),
     slotIntervalMinutes: z.number().int().min(5).max(240),
+    maxConcurrentBookings: z.number().int().min(1).max(50).default(1),
+    cancellationWindowHours: z.number().int().min(0).max(168).default(24),
     canEditPrices: z.boolean(),
     canManageServicesAdvanced: z.boolean(),
   })
@@ -299,6 +301,12 @@ export async function createTenantAction(
     closingTime: String(formData.get("closingTime") ?? ""),
     timeZone: String(formData.get("timeZone") ?? ""),
     slotIntervalMinutes: Number(formData.get("slotIntervalMinutes")),
+    maxConcurrentBookings: formData.has("maxConcurrentBookings")
+      ? Number(formData.get("maxConcurrentBookings"))
+      : 1,
+    cancellationWindowHours: formData.has("cancellationWindowHours")
+      ? Number(formData.get("cancellationWindowHours"))
+      : 24,
     canEditPrices: formData.has("canEditPrices")
       ? formData.get("canEditPrices") === "on" ||
         formData.get("canEditPrices") === "true"
@@ -330,6 +338,8 @@ export async function createTenantAction(
     closingTime,
     timeZone,
     slotIntervalMinutes,
+    maxConcurrentBookings,
+    cancellationWindowHours,
     canEditPrices,
     canManageServicesAdvanced,
   } = parsed.data;
@@ -395,6 +405,8 @@ export async function createTenantAction(
       nyitvatartas_vege: closingTime,
       time_zone: timeZone,
       slot_interval_minutes: slotIntervalMinutes,
+      max_concurrent_bookings: maxConcurrentBookings,
+      cancellation_window_hours: cancellationWindowHours,
       can_manage_services: canManageServicesAdvanced,
       can_edit_prices: canEditPrices,
       can_manage_services_advanced: canManageServicesAdvanced,
@@ -450,6 +462,12 @@ export async function updateTenantSettingsAction(
     closingTime: String(formData.get("closingTime") ?? ""),
     timeZone: String(formData.get("timeZone") ?? ""),
     slotIntervalMinutes: Number(formData.get("slotIntervalMinutes")),
+    maxConcurrentBookings: formData.has("maxConcurrentBookings")
+      ? Number(formData.get("maxConcurrentBookings"))
+      : 1,
+    cancellationWindowHours: formData.has("cancellationWindowHours")
+      ? Number(formData.get("cancellationWindowHours"))
+      : 24,
     canEditPrices:
       formData.get("canEditPrices") === "on" ||
       formData.get("canEditPrices") === "true",
@@ -472,6 +490,8 @@ export async function updateTenantSettingsAction(
     closingTime,
     timeZone,
     slotIntervalMinutes,
+    maxConcurrentBookings,
+    cancellationWindowHours,
     canEditPrices,
     canManageServicesAdvanced,
   } = parsed.data;
@@ -527,6 +547,19 @@ export async function updateTenantSettingsAction(
     }
     throw new Error(
       `A szolgáltató adatainak módosítása nem sikerült: ${error.message}`,
+    );
+  }
+
+  const { error: policyError } = await clients.admin
+    .from("companies")
+    .update({
+      max_concurrent_bookings: maxConcurrentBookings,
+      cancellation_window_hours: cancellationWindowHours,
+    })
+    .eq("id", companyId);
+  if (policyError) {
+    throw new Error(
+      `A kapacitás és lemondási határidő frissítése nem sikerült: ${policyError.message}`,
     );
   }
 
@@ -1876,6 +1909,64 @@ export async function deleteStaffMemberAction(
   return { success: "A munkatársat töröltük." };
 }
 
+const providerPolicySchema = z.object({
+  companyId: uuidSchema,
+  maxConcurrentBookings: z.number().int().min(1).max(50),
+  cancellationWindowHours: z.number().int().min(0).max(168),
+});
+
+export async function saveProviderPolicyAction(
+  _previousState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = providerPolicySchema.safeParse({
+    companyId: String(formData.get("companyId") ?? ""),
+    maxConcurrentBookings: Number(formData.get("maxConcurrentBookings")),
+    cancellationWindowHours: Number(formData.get("cancellationWindowHours")),
+  });
+
+  if (!parsed.success) {
+    return {
+      error:
+        "Ellenőrizd a párhuzamos kapacitást (1–50) és a lemondási határidőt (0–168 óra).",
+    };
+  }
+
+  const supabase = await createSupabaseServerClient();
+  const access = await verifyTenantCompanyAccess(
+    supabase,
+    parsed.data.companyId,
+  );
+  if (!access.ok) {
+    return { error: access.error };
+  }
+
+  const { error } = await supabase
+    .from("companies")
+    .update({
+      max_concurrent_bookings: parsed.data.maxConcurrentBookings,
+      cancellation_window_hours: parsed.data.cancellationWindowHours,
+    })
+    .eq("id", parsed.data.companyId);
+
+  if (error) {
+    return {
+      error: sanitizeDatabaseError(
+        "A kapacitás és lemondási szabályzat mentése nem sikerült",
+        error,
+      ),
+    };
+  }
+
+  revalidatePath("/dashboard");
+  revalidatePath("/superadmin");
+  revalidatePath("/", "layout");
+  return {
+    success:
+      "A párhuzamos kapacitást és az online lemondási határidőt elmentettük.",
+  };
+}
+
 const integrationsSchema = z.object({
   companyId: uuidSchema,
   googleReviewUrl: z
@@ -1896,6 +1987,8 @@ const integrationsSchema = z.object({
       "Az iCal naptár-URL-nek https:// vagy webcal:// előtaggal kell kezdődnie.",
     )
     .default(""),
+  maxConcurrentBookings: z.number().int().min(1).max(50).optional(),
+  cancellationWindowHours: z.number().int().min(0).max(168).optional(),
 });
 
 export async function saveIntegrationsSettingsAction(
@@ -1906,6 +1999,12 @@ export async function saveIntegrationsSettingsAction(
     companyId: String(formData.get("companyId") ?? ""),
     googleReviewUrl: String(formData.get("googleReviewUrl") ?? ""),
     externalCalendarIcsUrl: String(formData.get("externalCalendarIcsUrl") ?? ""),
+    maxConcurrentBookings: formData.has("maxConcurrentBookings")
+      ? Number(formData.get("maxConcurrentBookings"))
+      : undefined,
+    cancellationWindowHours: formData.has("cancellationWindowHours")
+      ? Number(formData.get("cancellationWindowHours"))
+      : undefined,
   });
 
   if (!parsed.success) {
@@ -1926,12 +2025,21 @@ export async function saveIntegrationsSettingsAction(
     return { error: access.error };
   }
 
+  const updatePayload: Record<string, unknown> = {
+    google_review_url: parsed.data.googleReviewUrl || null,
+    external_calendar_ics_url: parsed.data.externalCalendarIcsUrl || null,
+  };
+  if (parsed.data.maxConcurrentBookings !== undefined) {
+    updatePayload.max_concurrent_bookings = parsed.data.maxConcurrentBookings;
+  }
+  if (parsed.data.cancellationWindowHours !== undefined) {
+    updatePayload.cancellation_window_hours =
+      parsed.data.cancellationWindowHours;
+  }
+
   const { error } = await supabase
     .from("companies")
-    .update({
-      google_review_url: parsed.data.googleReviewUrl || null,
-      external_calendar_ics_url: parsed.data.externalCalendarIcsUrl || null,
-    })
+    .update(updatePayload)
     .eq("id", parsed.data.companyId);
 
   if (error) {

@@ -11,6 +11,7 @@ interface CancelBookingClientProps {
   customerName: string;
   startsAtFormatted: string;
   isWithin24Hours: boolean;
+  cancellationWindowHours?: number;
   isAlreadyCancelled: boolean;
   isProCompany: boolean;
 }
@@ -22,6 +23,7 @@ export default function CancelBookingClient({
   customerName,
   startsAtFormatted,
   isWithin24Hours,
+  cancellationWindowHours = 24,
   isAlreadyCancelled,
   isProCompany,
 }: CancelBookingClientProps) {
@@ -198,8 +200,8 @@ export default function CancelBookingClient({
           role="alert"
         >
           {t(
-            "24 órán belüli időpont online már nem mondható le. Kérjük, vedd fel a kapcsolatot közvetlenül a szolgáltatóval telefonon!",
-            "Appointments within 24 hours cannot be cancelled online. Please contact the provider directly by phone!",
+            `${cancellationWindowHours} órán belüli időpont online már nem mondható le. Kérjük, vedd fel a kapcsolatot közvetlenül a szolgáltatóval telefonon!`,
+            `Appointments within ${cancellationWindowHours} hours cannot be cancelled online. Please contact the provider directly by phone!`,
           )}
         </div>
       ) : (

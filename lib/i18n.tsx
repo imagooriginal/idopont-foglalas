@@ -164,16 +164,6 @@ const HU_TO_EN_EXACT: Array<[string, string]> = [
   ["Aktív", "Active"],
   ["Rejtett", "Hidden"],
   ["Még nincs szolgáltatás.", "No services yet."],
-  ["Platform admin", "Platform Admin"],
-  ["SaaS áttekintő", "SaaS Overview"],
-  [
-    "Tenantok, felhasználók és szolgáltatáscsomagok kezelése.",
-    "Manage tenants, users, and subscription plans.",
-  ],
-  ["Regisztrált előfizetők", "Registered Subscribers"],
-  ["Aktív és jóváhagyásra váró tenantok", "Active and pending tenants"],
-  ["Regisztrált felhasználók", "Registered Users"],
-  ["Supabase Auth-fiókok", "Supabase Auth accounts"],
   ["Free csomag", "Free Plan"],
   ["Alap (Starter) csomag", "Starter Plan"],
   ["Prémium (Pro) csomag", "Premium (Pro) Plan"],
@@ -254,6 +244,8 @@ function translateDomTree(root: Node, targetLocale: Locale) {
   }
 }
 
+let hasTranslatedDomOnce = false;
+
 export function LanguageProvider({ children }: { children: ReactNode }) {
   const { locale } = useLanguage();
 
@@ -271,7 +263,15 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (typeof document === "undefined") return;
     document.documentElement.lang = locale;
-    translateDomTree(document.body, locale);
+    // Skip DOM text mutation on initial Hungarian SSR hydration to avoid mismatched React text nodes.
+    if (locale === "hu" && !hasTranslatedDomOnce) {
+      return;
+    }
+    const rafId = window.requestAnimationFrame(() => {
+      hasTranslatedDomOnce = true;
+      translateDomTree(document.body, locale);
+    });
+    return () => window.cancelAnimationFrame(rafId);
   }, [locale]);
 
   return <>{children}</>;

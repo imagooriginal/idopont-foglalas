@@ -8,6 +8,7 @@ import {
   removeBlacklistEntryAction,
   saveCustomerNoteAction,
   saveIntegrationsSettingsAction,
+  saveProviderPolicyAction,
   syncExternalGoogleCalendarAction,
   type ActionState,
   type CompanyPlan,
@@ -104,6 +105,8 @@ export default function PremiumFeaturesSection({
   googleReviewUrl,
   externalCalendarIcsUrl,
   externalCalendarLastSyncedAt,
+  cancellationWindowHours = 24,
+  maxConcurrentBookings = 1,
   auditLogs = [],
 }: {
   companyId: string;
@@ -118,6 +121,8 @@ export default function PremiumFeaturesSection({
   googleReviewUrl?: string | null;
   externalCalendarIcsUrl?: string | null;
   externalCalendarLastSyncedAt?: string | null;
+  cancellationWindowHours?: number;
+  maxConcurrentBookings?: number;
   auditLogs?: AuditLogItem[];
 }) {
   const { t } = useLanguage();
@@ -147,9 +152,88 @@ export default function PremiumFeaturesSection({
     syncExternalGoogleCalendarAction ?? fallbackAction,
     initialState,
   );
+  const [policyState, policyAction, policyPending] = useActionState(
+    saveProviderPolicyAction ?? fallbackAction,
+    initialState,
+  );
 
   return (
     <section className="space-y-6" id="premium-features">
+      <div className="rounded-3xl border border-slate-200/90 bg-white p-5 shadow-sm sm:p-6">
+        <div className="mb-4 border-b border-slate-100 pb-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">
+            {t("Foglalási szabályzat", "Booking Policy")}
+          </p>
+          <h2 className="mt-1 text-lg font-bold text-slate-950">
+            {t(
+              "Kapacitás és online lemondási határidő testreszabása",
+              "Parallel Capacity & Online Cancellation Cutoff",
+            )}
+          </h2>
+          <p className="mt-1 text-xs text-slate-500">
+            {t(
+              "Állítsd be, hány párhuzamos időpont fogadható egy időben (hány munkatárs / munkaállomás dolgozik egyszerre), és hány órával az időpont előttig lehetséges az online lemondás/átütemezés.",
+              "Configure how many concurrent bookings can overlap simultaneously and how many hours before the appointment online cancellation/rescheduling stays allowed.",
+            )}
+          </p>
+        </div>
+
+        <form action={policyAction} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 lg:items-end">
+          <input name="companyId" type="hidden" value={companyId} />
+          <label className="block space-y-1 text-xs font-semibold text-slate-700">
+            {t(
+              "Lemondási / átütemezési határidő (óra, 0–168)",
+              "Cancellation / reschedule cutoff (hours, 0–168)",
+            )}
+            <input
+              className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-normal"
+              defaultValue={cancellationWindowHours}
+              max={168}
+              min={0}
+              name="cancellationWindowHours"
+              required
+              type="number"
+            />
+          </label>
+          <label className="block space-y-1 text-xs font-semibold text-slate-700">
+            {t(
+              "Párhuzamosan futó szálak / munkatársak száma (1–50)",
+              "Concurrent capacity / parallel workers (1–50)",
+            )}
+            <input
+              className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-normal"
+              defaultValue={maxConcurrentBookings}
+              max={50}
+              min={1}
+              name="maxConcurrentBookings"
+              required
+              type="number"
+            />
+          </label>
+          <div className="flex flex-col gap-1.5">
+            <button
+              className="h-10 rounded-xl bg-blue-700 px-4 text-xs font-semibold text-white transition hover:bg-blue-800 disabled:opacity-50"
+              disabled={policyPending}
+              type="submit"
+            >
+              {policyPending
+                ? t("Mentés...", "Saving...")
+                : t("Szabályzat mentése", "Save Policy")}
+            </button>
+          </div>
+          {policyState.error && (
+            <p className="sm:col-span-2 lg:col-span-3 text-xs font-semibold text-red-600" role="alert">
+              {policyState.error}
+            </p>
+          )}
+          {policyState.success && (
+            <p className="sm:col-span-2 lg:col-span-3 text-xs font-semibold text-emerald-700" role="status">
+              {policyState.success}
+            </p>
+          )}
+        </form>
+      </div>
+
       <div className="rounded-3xl border border-slate-200/90 bg-white p-5 shadow-sm sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4 mb-5">
           <div>
@@ -545,8 +629,8 @@ export default function PremiumFeaturesSection({
                 <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-xs">
                   <p className="font-semibold text-blue-900">
                     {t(
-                      "Kimenő élő naptár-előfizetési URL (Google Calendar -> Feliratkozás URL alapján):",
-                      "Outbound Live iCal Feed URL (Subscribe in Google / Apple Calendar):",
+                      "Kimenő élő naptár-hivatkozás (Google / Apple / Outlook naptárfájlként / .ics előfizetésként):",
+                      "Outbound Live Calendar Feed URL (Google / Apple / Outlook .ics subscription):",
                     )}
                   </p>
                   <code className="mt-1 block break-all rounded bg-white px-2 py-1 text-[11px] text-slate-800 ring-1 ring-blue-100">

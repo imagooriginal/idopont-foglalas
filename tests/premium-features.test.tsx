@@ -12,6 +12,7 @@ import {
   deliverGoogleReviewEmail,
 } from "../lib/booking-emails";
 import { createIcsCalendarFeed, parseIcsEvents } from "../lib/calendar";
+import CancelBookingClient from "../app/cancel/[token]/CancelBookingClient";
 import VisualCalendarView from "../app/dashboard/VisualCalendarView";
 
 const resendSendMock = vi.hoisted(() => vi.fn());
@@ -1052,6 +1053,50 @@ describe("Starter vs. Pro (Prémium) Tier Separation, Security & Business Featur
         screen.getByText(/Naptárnézet \(Heti \/ Napi\)/i),
       ).toBeInTheDocument();
       expect(screen.getByText("Kovács Anna")).toBeInTheDocument();
+    });
+
+    it("supports custom cancellation_window_hours in /api/bookings/cancel and CancelBookingClient", async () => {
+      publicSupabaseMock.rpc.mockResolvedValue({
+        data: null,
+        error: {
+          message:
+            "Cancellation is only allowed more than 48 hours before the appointment.",
+        },
+      });
+
+      const response = await cancelPost(
+        new Request("http://localhost/api/bookings/cancel", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": "203.0.113.99",
+          },
+          body: JSON.stringify({ token: CANCEL_TOKEN }),
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      const payload = await response.json();
+      expect(payload.code).toBe("WITHIN_24_HOURS");
+      expect(payload.error).toContain("48 órán belüli");
+
+      render(
+        <CancelBookingClient
+          cancellationWindowHours={48}
+          companyName="Teszt Műhely"
+          customerName="Kiss Béla"
+          isAlreadyCancelled={false}
+          isProCompany={true}
+          isWithin24Hours={true}
+          serviceName="Olajcsere"
+          startsAtFormatted="2030. július 10. 10:00"
+          token={CANCEL_TOKEN}
+        />,
+      );
+
+      expect(
+        screen.getByText(/48 órán belüli időpont online már nem mondható le/i),
+      ).toBeInTheDocument();
     });
   });
 });

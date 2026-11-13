@@ -33,7 +33,7 @@ export default async function SuperadminPage({
   const { data: companyData, error: companiesError } = await admin
     .from("companies")
     .select(
-      "id, status, nev, slug, owner_id, plan, primary_color, subscription_started_at, nyitvatartas_kezdet, nyitvatartas_vege, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, time_zone, slot_interval_minutes",
+      "id, status, nev, slug, owner_id, plan, primary_color, subscription_started_at, nyitvatartas_kezdet, nyitvatartas_vege, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, time_zone, slot_interval_minutes, max_concurrent_bookings, cancellation_window_hours",
     )
     .order("nev", { ascending: true });
   if (companiesError) {
@@ -101,8 +101,15 @@ export default async function SuperadminPage({
     services = (data ?? []) as SuperadminService[];
   }
 
+  const authUsers = users.map((user) => ({
+    id: user.id,
+    email: user.email ?? "Nincs e-mail-cím",
+    createdAt: user.created_at ?? "",
+  }));
+
   return (
     <SuperadminConsole
+      authUsers={authUsers}
       companies={companies}
       ownerEmails={Object.fromEntries(ownerEmails)}
       selectedCompanyId={selectedCompany?.id ?? ""}

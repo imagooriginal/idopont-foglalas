@@ -51,6 +51,14 @@ export interface SuperadminCompany {
   custom_booking_fields: unknown;
   time_zone: string;
   slot_interval_minutes: number;
+  max_concurrent_bookings?: number;
+  cancellation_window_hours?: number;
+}
+
+export interface SuperadminAuthUser {
+  id: string;
+  email: string;
+  createdAt: string;
 }
 
 export interface SuperadminService {
@@ -62,6 +70,8 @@ export interface SuperadminService {
   leiras: string;
   is_active: boolean;
 }
+
+type MetricView = "all_tenants" | "auth_users" | "starter_tenants" | "pro_tenants";
 
 const initialState: SuperadminActionState = {};
 
@@ -92,20 +102,38 @@ function Metric({
   value,
   detail,
   color,
+  isActive,
+  onClick,
 }: {
   label: string;
   value: number;
   detail: string;
   color: string;
+  isActive?: boolean;
+  onClick?: () => void;
 }) {
   return (
-    <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:shadow-md">
-      <p className="text-sm font-medium text-slate-500">{label}</p>
+    <button
+      aria-pressed={isActive}
+      className={`w-full rounded-2xl border bg-white p-5 text-left shadow-sm transition hover:shadow-md ${
+        isActive
+          ? "border-blue-600 ring-2 ring-blue-500/20"
+          : "border-slate-200 hover:border-slate-300"
+      }`}
+      onClick={onClick}
+      type="button"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm font-medium text-slate-500">{label}</p>
+        <span className="text-xs font-semibold text-blue-700">
+          {isActive ? "▲ Bezárás" : "▾ Adatok"}
+        </span>
+      </div>
       <p className="mt-3 text-3xl font-bold tracking-tight text-slate-950">
         {value}
       </p>
       <p className={`mt-2 text-xs font-medium ${color}`}>{detail}</p>
-    </article>
+    </button>
   );
 }
 
@@ -252,6 +280,32 @@ function TenantCreateForm() {
               max={240}
               min={5}
               name="slotIntervalMinutes"
+              required
+              type="number"
+            />
+          </label>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Egyidejű dolgozók / szálak (db)
+            <input
+              className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal"
+              defaultValue={1}
+              max={50}
+              min={1}
+              name="maxConcurrentBookings"
+              required
+              type="number"
+            />
+          </label>
+          <label className="space-y-1.5 text-sm font-medium text-slate-700">
+            Online lemondási határidő (óra)
+            <input
+              className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal"
+              defaultValue={24}
+              max={168}
+              min={0}
+              name="cancellationWindowHours"
               required
               type="number"
             />
@@ -430,6 +484,30 @@ function TenantSettingsForm({ company }: { company: SuperadminCompany }) {
             max={240}
             min={5}
             name="slotIntervalMinutes"
+            required
+            type="number"
+          />
+        </label>
+        <label className="space-y-1.5 text-sm font-medium text-slate-700">
+          Egyidejű dolgozók / szálak (db)
+          <input
+            className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal"
+            defaultValue={company.max_concurrent_bookings ?? 1}
+            max={50}
+            min={1}
+            name="maxConcurrentBookings"
+            required
+            type="number"
+          />
+        </label>
+        <label className="space-y-1.5 text-sm font-medium text-slate-700">
+          Online lemondási határidő (óra)
+          <input
+            className="h-11 w-full rounded-xl border border-slate-200 px-3 font-normal"
+            defaultValue={company.cancellation_window_hours ?? 24}
+            max={168}
+            min={0}
+            name="cancellationWindowHours"
             required
             type="number"
           />
@@ -865,34 +943,77 @@ function ServiceManager({
   );
 }
 
-function TenantTable({
-  companies,
-  ownerEmails,
+function CollapsiblePanel({
+  title,
+  subtitle,
+  badge,
+  isOpen,
+  onToggle,
+  children,
 }: {
-  companies: SuperadminCompany[];
-  ownerEmails: Record<string, string>;
+  title: string;
+  subtitle: string;
+  badge?: string;
+  isOpen: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
 }) {
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <div className="border-b border-slate-100 px-5 py-5 sm:px-6">
-        <h2 className="text-lg font-bold text-slate-950">
-          Szolgáltatók és előfizetők
-        </h2>
-        <p className="mt-1 text-sm text-slate-500">
-          A regisztráció kezdete és a manuálisan kezelt csomag.
-        </p>
-      </div>
-      {!companies.length ? (
-        <p className="p-8 text-center text-sm text-slate-500">
-          Még nincs regisztrált szolgáltató.
-        </p>
-      ) : (
-        <div className="divide-y divide-slate-100">
-          {companies.map((company) => (
-            <article
-              className="grid gap-3 px-5 py-4 sm:grid-cols-[minmax(0,1.3fr)_minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1fr)] sm:items-center sm:px-6"
-              key={company.id}
-            >
+      <button
+        aria-expanded={isOpen}
+        className="flex w-full items-center justify-between gap-4 bg-white px-5 py-4 text-left transition hover:bg-slate-50 sm:px-6"
+        onClick={onToggle}
+        type="button"
+      >
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h2 className="text-lg font-bold text-slate-950">{title}</h2>
+            {badge && (
+              <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-700">
+                {badge}
+              </span>
+            )}
+          </div>
+          <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>
+        </div>
+        <span className="shrink-0 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700">
+          {isOpen ? "▴ Bezárás" : "▾ Lenyitás"}
+        </span>
+      </button>
+      {isOpen && <div className="border-t border-slate-100 p-5 sm:p-6">{children}</div>}
+    </section>
+  );
+}
+
+function TenantTable({
+  companies,
+  ownerEmails,
+  expandedCompanyId,
+  onToggleExpand,
+  onSelectServices,
+}: {
+  companies: SuperadminCompany[];
+  ownerEmails: Record<string, string>;
+  expandedCompanyId: string | null;
+  onToggleExpand: (companyId: string) => void;
+  onSelectServices: (companyId: string) => void;
+}) {
+  if (!companies.length) {
+    return (
+      <p className="p-8 text-center text-sm text-slate-500">
+        Még nincs regisztrált szolgáltató.
+      </p>
+    );
+  }
+
+  return (
+    <div className="divide-y divide-slate-100">
+      {companies.map((company) => {
+        const isExpanded = expandedCompanyId === company.id;
+        return (
+          <div key={company.id}>
+            <article className="grid gap-3 py-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,0.7fr)_minmax(0,1fr)_minmax(0,0.9fr)_auto] xl:items-center">
               <div className="flex min-w-0 items-center gap-3">
                 <span
                   aria-hidden="true"
@@ -902,12 +1023,14 @@ function TenantTable({
                 <div className="min-w-0">
                   <p className="truncate font-semibold text-slate-900">{company.nev}</p>
                   <p className="truncate text-xs text-slate-500">
-                    /{company.slug} · {ownerEmails[company.owner_id] ?? "Nincs kapcsolattartó"}
+                    /{company.slug} · {ownerEmails[company.owner_id] ?? "Nincs kapcsolattartó"} ·{" "}
+                    {company.max_concurrent_bookings ?? 1} szál · lemondás:{" "}
+                    {company.cancellation_window_hours ?? 24} óra
                   </p>
                 </div>
               </div>
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 sm:hidden">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 xl:hidden">
                   Regisztráció
                 </p>
                 <p className="text-sm text-slate-700">
@@ -915,13 +1038,13 @@ function TenantTable({
                 </p>
               </div>
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 sm:hidden">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 xl:hidden">
                   Csomag kezelése
                 </p>
                 <PlanForm company={company} key={`${company.id}:${company.plan}`} />
               </div>
               <div>
-                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400 sm:hidden">
+                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400 xl:hidden">
                   Státusz
                 </p>
                 <TenantStatusForm
@@ -929,11 +1052,39 @@ function TenantTable({
                   key={`${company.id}:${company.status}`}
                 />
               </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                    isExpanded
+                      ? "border-blue-600 bg-blue-50 text-blue-800"
+                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                  }`}
+                  onClick={() => onToggleExpand(company.id)}
+                  type="button"
+                >
+                  {isExpanded ? "Szerkesztés bezárása ▴" : "Teljes szerkesztés ▾"}
+                </button>
+                <button
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                  onClick={() => onSelectServices(company.id)}
+                  type="button"
+                >
+                  Szolgáltatások
+                </button>
+              </div>
             </article>
-          ))}
-        </div>
-      )}
-    </section>
+            {isExpanded && (
+              <div className="mb-4 rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200/80">
+                <TenantSettingsForm
+                  company={company}
+                  key={`row-settings:${company.id}:${company.can_edit_prices}:${company.can_manage_services_advanced}:${company.max_concurrent_bookings ?? 1}:${company.cancellation_window_hours ?? 24}:${bookingFieldsToLines(company.custom_booking_fields)}`}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -943,15 +1094,25 @@ export default function SuperadminConsole({
   selectedCompanyId,
   services,
   totalAuthUsers,
+  authUsers = [],
 }: {
   companies: SuperadminCompany[];
   ownerEmails: Record<string, string>;
   selectedCompanyId: string;
   services: SuperadminService[];
   totalAuthUsers: number;
+  authUsers?: SuperadminAuthUser[];
 }) {
   const router = useRouter();
   const { t } = useLanguage();
+  const [activeMetricView, setActiveMetricView] = useState<MetricView | null>(null);
+  const [openCreatePanel, setOpenCreatePanel] = useState(false);
+  const [openServicesPanel, setOpenServicesPanel] = useState(Boolean(selectedCompanyId));
+  const [openTenantsPanel, setOpenTenantsPanel] = useState(true);
+  const [expandedCompanyId, setExpandedCompanyId] = useState<string | null>(
+    selectedCompanyId || null,
+  );
+
   const selectedCompany = companies.find(
     (company) => company.id === selectedCompanyId,
   );
@@ -960,9 +1121,30 @@ export default function SuperadminConsole({
     pro: companies.filter((company) => company.plan === "pro").length,
   };
 
+  function toggleMetric(view: MetricView) {
+    setActiveMetricView((prev) => (prev === view ? null : view));
+  }
+
+  function handleJumpToEdit(companyId: string) {
+    setOpenTenantsPanel(true);
+    setExpandedCompanyId(companyId);
+  }
+
+  function handleSelectServices(companyId: string) {
+    setOpenServicesPanel(true);
+    router.push(`/superadmin?company=${encodeURIComponent(companyId)}`);
+  }
+
+  const filteredMetricCompanies =
+    activeMetricView === "starter_tenants"
+      ? companies.filter((c) => c.plan !== "pro")
+      : activeMetricView === "pro_tenants"
+        ? companies.filter((c) => c.plan === "pro")
+        : companies;
+
   return (
-    <main className="min-h-screen bg-slate-50 px-4 py-8 pb-12 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-7xl space-y-7">
+    <main className="min-h-screen bg-slate-50 px-4 py-8 pb-12 sm:px-6 lg:px-10">
+      <div className="mx-auto max-w-[1800px] space-y-6">
         <header className="flex flex-col gap-4 border-b border-slate-200 pb-6 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="text-sm font-semibold uppercase tracking-[0.12em] text-blue-700">
@@ -973,8 +1155,8 @@ export default function SuperadminConsole({
             </h1>
             <p className="mt-2 text-sm text-slate-500">
               {t(
-                "Tenantok, felhasználók és szolgáltatáscsomagok kezelése.",
-                "Manage tenants, users, and subscription plans.",
+                "Tenantok, felhasználók, kapacitás és szolgáltatáscsomagok kezelése.",
+                "Manage tenants, users, capacity, and subscription plans.",
               )}
             </p>
           </div>
@@ -995,102 +1177,242 @@ export default function SuperadminConsole({
         >
           <Metric
             color="text-blue-700"
-            detail="Aktív és jóváhagyásra váró tenantok"
+            detail="Kattints a teljes céglistához"
+            isActive={activeMetricView === "all_tenants"}
             label="Regisztrált előfizetők"
+            onClick={() => toggleMetric("all_tenants")}
             value={companies.length}
           />
           <Metric
             color="text-violet-700"
-            detail="Supabase Auth-fiókok"
+            detail="Kattints a felhasználói táblához"
+            isActive={activeMetricView === "auth_users"}
             label="Regisztrált felhasználók"
+            onClick={() => toggleMetric("auth_users")}
             value={totalAuthUsers}
           />
           <Metric
             color="text-slate-700"
-            detail="Alapszintű előfizetők"
+            detail="Kattints az Alap csomagos cégekhez"
+            isActive={activeMetricView === "starter_tenants"}
             label="Alap (Starter) csomag"
+            onClick={() => toggleMetric("starter_tenants")}
             value={plans.starter}
           />
           <Metric
             color="text-emerald-700"
-            detail="Minden prémium funkció aktív"
+            detail="Kattints a Prémium csomagos cégekhez"
+            isActive={activeMetricView === "pro_tenants"}
             label="Prémium (Pro) csomag"
+            onClick={() => toggleMetric("pro_tenants")}
             value={plans.pro}
           />
         </section>
 
-        <div className="grid items-start gap-6 xl:grid-cols-[minmax(19rem,0.8fr)_minmax(0,1.2fr)]">
-          <TenantCreateForm />
-          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-            <div className="flex flex-wrap items-start justify-between gap-4">
+        {activeMetricView && (
+          <section className="overflow-hidden rounded-2xl border border-blue-200 bg-white p-5 shadow-sm sm:p-6">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">
-                  Tenant kontextus
-                </p>
-                <h2 className="mt-1 text-lg font-bold text-slate-950">
-                  Szolgáltatások kezelése
+                <h2 className="text-base font-bold text-slate-950">
+                  {activeMetricView === "auth_users"
+                    ? "Regisztrált felhasználók (Auth fiókok)"
+                    : activeMetricView === "starter_tenants"
+                      ? "Alap (Starter) csomagos szolgáltatók"
+                      : activeMetricView === "pro_tenants"
+                        ? "Prémium (Pro) csomagos szolgáltatók"
+                        : "Összes regisztrált szolgáltató"}
                 </h2>
+                <p className="text-xs text-slate-500">
+                  Gyors táblázatos áttekintés — kattints bármelyik cég mellett a szerkesztésre.
+                </p>
               </div>
-              <label className="w-full space-y-1.5 text-xs font-semibold text-slate-500 sm:w-auto">
-                Kiválasztott szolgáltató
-                <select
-                  className="block h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-800 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 sm:min-w-64"
-                  onChange={(event) =>
-                    router.push(
-                      event.target.value
-                        ? `/superadmin?company=${encodeURIComponent(event.target.value)}`
-                        : "/superadmin",
-                    )
-                  }
-                  value={selectedCompanyId}
-                >
-                  <option value="">Válassz szolgáltatót...</option>
-                  {companies.map((company) => (
-                    <option key={company.id} value={company.id}>
-                      {company.nev}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <button
+                className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                onClick={() => setActiveMetricView(null)}
+                type="button"
+              >
+                Bezárás ✕
+              </button>
             </div>
-            {selectedCompany ? (
-              <div className="mt-5">
-                <div className="mb-4 flex items-center gap-2 rounded-xl bg-slate-50 p-3">
-                  <span
-                    className="size-3 rounded-full"
-                    style={{ backgroundColor: selectedCompany.primary_color }}
-                  />
-                  <p className="text-sm font-semibold text-slate-800">
-                    {selectedCompany.nev}
-                  </p>
-                  <span className="ml-auto text-xs text-slate-500">
-                    /{selectedCompany.slug}
-                  </span>
-                </div>
-                <ServiceManager
-                  companyId={selectedCompany.id}
-                  key={`${selectedCompany.id}:${services.map((service) => `${service.id}-${service.display_order}-${service.nev}-${service.idotartam_percben}-${service.ar}-${service.leiras}-${service.is_active}`).join(",")}`}
-                  services={services}
-                />
-                <div className="mt-5">
-                  <TenantSettingsForm
-                    company={selectedCompany}
-                    key={`settings:${selectedCompany.id}:${selectedCompany.can_edit_prices}:${selectedCompany.can_manage_services_advanced}:${bookingFieldsToLines(selectedCompany.custom_booking_fields)}`}
-                  />
-                </div>
+
+            {activeMetricView === "auth_users" ? (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[640px] border-collapse text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      <th className="py-2.5 pr-4">E-mail cím</th>
+                      <th className="py-2.5 pr-4">User ID</th>
+                      <th className="py-2.5 pr-4">Létrehozva</th>
+                      <th className="py-2.5">Kapcsolt szolgáltatók</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {authUsers.map((user) => {
+                      const owned = companies.filter((c) => c.owner_id === user.id);
+                      return (
+                        <tr key={user.id}>
+                          <td className="py-2.5 pr-4 font-medium text-slate-900">
+                            {user.email}
+                          </td>
+                          <td className="py-2.5 pr-4 font-mono text-xs text-slate-500">
+                            {user.id}
+                          </td>
+                          <td className="py-2.5 pr-4 text-xs text-slate-600">
+                            {user.createdAt
+                              ? new Date(user.createdAt).toLocaleString("hu-HU")
+                              : "—"}
+                          </td>
+                          <td className="py-2.5 text-xs text-slate-700">
+                            {owned.length
+                              ? owned.map((c) => `${c.nev} (/${c.slug})`).join(", ")
+                              : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             ) : (
-              <div className="mt-5 rounded-2xl border border-dashed border-slate-200 px-5 py-12 text-center">
-                <p className="font-semibold text-slate-800">Még nincs szolgáltató</p>
-                <p className="mt-1 text-sm text-slate-500">
-                  Hozz létre egy tenantot a szolgáltatások kezeléséhez.
-                </p>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[780px] border-collapse text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      <th className="py-2.5 pr-4">Cég neve</th>
+                      <th className="py-2.5 pr-4">Foglalási oldal</th>
+                      <th className="py-2.5 pr-4">Tulajdonos</th>
+                      <th className="py-2.5 pr-4">Csomag</th>
+                      <th className="py-2.5 pr-4">Státusz</th>
+                      <th className="py-2.5 pr-4">Szálak</th>
+                      <th className="py-2.5 pr-4">Lemondás</th>
+                      <th className="py-2.5 text-right">Művelet</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredMetricCompanies.map((c) => (
+                      <tr key={c.id}>
+                        <td className="py-2.5 pr-4 font-semibold text-slate-900">
+                          {c.nev}
+                        </td>
+                        <td className="py-2.5 pr-4 text-xs text-blue-700">/{c.slug}</td>
+                        <td className="py-2.5 pr-4 text-xs text-slate-600">
+                          {ownerEmails[c.owner_id] ?? "—"}
+                        </td>
+                        <td className="py-2.5 pr-4 text-xs font-semibold">
+                          {c.plan === "pro" ? "Prémium (Pro)" : "Alap (Starter)"}
+                        </td>
+                        <td className="py-2.5 pr-4 text-xs">{c.status}</td>
+                        <td className="py-2.5 pr-4 text-xs">
+                          {c.max_concurrent_bookings ?? 1} fő
+                        </td>
+                        <td className="py-2.5 pr-4 text-xs">
+                          {c.cancellation_window_hours ?? 24} óra
+                        </td>
+                        <td className="py-2.5 text-right">
+                          <button
+                            className="rounded-lg bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                            onClick={() => handleJumpToEdit(c.id)}
+                            type="button"
+                          >
+                            Szerkesztés megnyitása
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </section>
-        </div>
+        )}
 
-        <TenantTable companies={companies} ownerEmails={ownerEmails} />
+        <CollapsiblePanel
+          badge="Új tenant"
+          isOpen={openCreatePanel}
+          onToggle={() => setOpenCreatePanel((prev) => !prev)}
+          subtitle="Új szolgáltató felvétele, párhuzamos szálak és nyitvatartás beállítása"
+          title="1. Új szolgáltató hozzáadása"
+        >
+          <TenantCreateForm />
+        </CollapsiblePanel>
+
+        <CollapsiblePanel
+          badge={selectedCompany ? selectedCompany.nev : "Nincs kiválasztva"}
+          isOpen={openServicesPanel}
+          onToggle={() => setOpenServicesPanel((prev) => !prev)}
+          subtitle="Válassz szolgáltatót a szolgáltatáslista, sorrend és árazás szerkesztéséhez"
+          title="2. Kiválasztott szolgáltató szolgáltatásai"
+        >
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
+            <label className="w-full space-y-1.5 text-xs font-semibold text-slate-500 sm:w-auto">
+              Kiválasztott szolgáltató
+              <select
+                className="block h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-800 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 sm:min-w-72"
+                onChange={(event) =>
+                  router.push(
+                    event.target.value
+                      ? `/superadmin?company=${encodeURIComponent(event.target.value)}`
+                      : "/superadmin",
+                  )
+                }
+                value={selectedCompanyId}
+              >
+                <option value="">Válassz szolgáltatót...</option>
+                {companies.map((company) => (
+                  <option key={company.id} value={company.id}>
+                    {company.nev}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {selectedCompany ? (
+            <div>
+              <div className="mb-4 flex items-center gap-2 rounded-xl bg-slate-50 p-3">
+                <span
+                  className="size-3 rounded-full"
+                  style={{ backgroundColor: selectedCompany.primary_color }}
+                />
+                <p className="text-sm font-semibold text-slate-800">
+                  {selectedCompany.nev}
+                </p>
+                <span className="ml-auto text-xs text-slate-500">
+                  /{selectedCompany.slug}
+                </span>
+              </div>
+              <ServiceManager
+                companyId={selectedCompany.id}
+                key={`${selectedCompany.id}:${services.map((service) => `${service.id}-${service.display_order}-${service.nev}-${service.idotartam_percben}-${service.ar}-${service.leiras}-${service.is_active}`).join(",")}`}
+                services={services}
+              />
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-slate-200 px-5 py-10 text-center">
+              <p className="font-semibold text-slate-800">Még nincs kiválasztott szolgáltató</p>
+              <p className="mt-1 text-sm text-slate-500">
+                Válassz egyet a legördülő listából, vagy hozz létre új tenantot.
+              </p>
+            </div>
+          )}
+        </CollapsiblePanel>
+
+        <CollapsiblePanel
+          badge={`${companies.length} db`}
+          isOpen={openTenantsPanel}
+          onToggle={() => setOpenTenantsPanel((prev) => !prev)}
+          subtitle="Minden regisztrált szolgáltató közvetlenül szerkeszthető (csomag, státusz, szálak száma, lemondási határidő, nyitvatartás)"
+          title="3. Szolgáltatók és előfizetők"
+        >
+          <TenantTable
+            companies={companies}
+            expandedCompanyId={expandedCompanyId}
+            onSelectServices={handleSelectServices}
+            onToggleExpand={(id) =>
+              setExpandedCompanyId((prev) => (prev === id ? null : id))
+            }
+            ownerEmails={ownerEmails}
+          />
+        </CollapsiblePanel>
       </div>
     </main>
   );

@@ -327,7 +327,7 @@ export default async function DashboardPage({
   const { data: companies, error: companiesError } = await supabase
     .from("companies")
     .select(
-      "id, nev, slug, status, plan, time_zone, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, nyitvatartas_kezdet, nyitvatartas_vege, google_review_url, calendar_feed_token, external_calendar_ics_url, external_calendar_last_synced_at",
+      "id, nev, slug, status, plan, time_zone, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, nyitvatartas_kezdet, nyitvatartas_vege, google_review_url, calendar_feed_token, external_calendar_ics_url, external_calendar_last_synced_at, max_concurrent_bookings, cancellation_window_hours",
     )
     .eq("owner_id", userData.user.id);
 
@@ -675,34 +675,6 @@ export default async function DashboardPage({
               </a>
             </p>
           </div>
-          {companies.length > 1 && (
-            <form
-              action="/dashboard"
-              className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-end"
-            >
-              <label className="space-y-1.5 text-sm font-medium text-slate-700" htmlFor="company">
-                Szolgáltató
-                <select
-                  className="block w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 shadow-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100 sm:min-w-52"
-                  defaultValue={company.id}
-                  id="company"
-                  name="company"
-                >
-                  {companies.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.nev}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
-                type="submit"
-              >
-                Megnyitás
-              </button>
-            </form>
-          )}
         </section>
 
         <section aria-label="Foglalási összesítő" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -941,12 +913,14 @@ export default async function DashboardPage({
           auditLogs={auditLogs}
           blacklist={blacklistEntries}
           calendarFeedToken={(company as { calendar_feed_token?: string | null }).calendar_feed_token ?? null}
+          cancellationWindowHours={(company as { cancellation_window_hours?: number | null }).cancellation_window_hours ?? 24}
           companyId={company.id}
           customFieldsCount={customFieldLabels.size}
           customerHistory={customerHistory}
           externalCalendarIcsUrl={(company as { external_calendar_ics_url?: string | null }).external_calendar_ics_url ?? null}
           externalCalendarLastSyncedAt={(company as { external_calendar_last_synced_at?: string | null }).external_calendar_last_synced_at ?? null}
           googleReviewUrl={(company as { google_review_url?: string | null }).google_review_url ?? null}
+          maxConcurrentBookings={(company as { max_concurrent_bookings?: number | null }).max_concurrent_bookings ?? 1}
           notes={notesList}
           plan={companyPlan}
           recentBookings={bookings.map((b) => ({

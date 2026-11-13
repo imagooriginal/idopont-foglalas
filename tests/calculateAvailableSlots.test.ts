@@ -97,4 +97,43 @@ describe("calculateAvailableSlots", () => {
       calculateAvailableSlots({ ...defaultParams, slotIntervalMinutes }),
     ).toThrow(RangeError);
   });
+
+  it("allows parallel overlapping bookings up to maxConcurrentBookings and still respects manual blockouts", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-15T08:00:00.000Z"));
+
+    const bookings = [
+      { id: "b1", start: "09:00", end: "09:30", status: "confirmed" as const },
+      { id: "b2", start: "09:00", end: "09:30", status: "confirmed" as const },
+      { id: "b3", start: "09:30", end: "10:00", status: "confirmed" as const },
+    ];
+
+    // Kapacitás = 1 -> 09:00 és 09:30 is foglalt
+    expect(
+      calculateAvailableSlots({
+        ...defaultParams,
+        existingBookings: bookings,
+        maxConcurrentBookings: 1,
+      }),
+    ).toEqual(["10:00", "10:30"]);
+
+    // Kapacitás = 2 -> 09:00-ra már 2 foglalás van (tele), de 09:30-ra csak 1 (még szabad!)
+    expect(
+      calculateAvailableSlots({
+        ...defaultParams,
+        existingBookings: bookings,
+        maxConcurrentBookings: 2,
+      }),
+    ).toEqual(["09:30", "10:00", "10:30"]);
+
+    // Manuális blokkolás (pl. műhelyzár) továbbra is az összes szálat tiltja
+    expect(
+      calculateAvailableSlots({
+        ...defaultParams,
+        existingBookings: bookings,
+        manualBlockouts: [{ start: "09:30", end: "10:00" }],
+        maxConcurrentBookings: 3,
+      }),
+    ).toEqual(["09:00", "10:00", "10:30"]);
+  });
 });

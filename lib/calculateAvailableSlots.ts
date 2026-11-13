@@ -27,6 +27,7 @@ export interface CalculateSlotsParams {
   slotIntervalMinutes: number;
   existingBookings: Booking[];
   manualBlockouts: ManualBlockout[];
+  maxConcurrentBookings?: number;
 }
 
 interface TimeRange {
@@ -63,40 +64,34 @@ function isOverlapping(slot: TimeRange, block: TimeRange): boolean {
 }
 
 /**
- * Kiszűri és egységes TimeRange formátumra hozza a ténylegesen blokkolt idősávokat.
+ * Kiszűri és egységes TimeRange formátumra hozza a manuális tiltásokat és az aktív foglalásokat.
  */
-function getBlockedRanges(
+function partitionBlockedRanges(
   bookings: Booking[],
   blockouts: ManualBlockout[],
   now: Date
-): TimeRange[] {
-  const blockedRanges: TimeRange[] = [];
+): { blockoutRanges: TimeRange[]; bookingRanges: TimeRange[] } {
+  const blockoutRanges: TimeRange[] = blockouts.map((block) => ({
+    startMin: timeToMinutes(block.start),
+    endMin: timeToMinutes(block.end),
+  }));
 
-  // Manuális blokkolások feldolgozása
-  for (const block of blockouts) {
-    blockedRanges.push({
-      startMin: timeToMinutes(block.start),
-      endMin: timeToMinutes(block.end),
-    });
-  }
-
-  // Foglalások feldolgozása
+  const bookingRanges: TimeRange[] = [];
   for (const booking of bookings) {
     const isConfirmed = booking.status === 'confirmed';
     const isLockedPending =
       booking.status === 'pending' &&
-      booking.lockedUntil &&
-      booking.lockedUntil > now;
+      Boolean(booking.lockedUntil && booking.lockedUntil > now);
 
     if (isConfirmed || isLockedPending) {
-      blockedRanges.push({
+      bookingRanges.push({
         startMin: timeToMinutes(booking.start),
         endMin: timeToMinutes(booking.end),
       });
     }
   }
 
-  return blockedRanges;
+  return { blockoutRanges, bookingRanges };
 }
 
 // --- Fő függvény ---
@@ -111,6 +106,7 @@ export function calculateAvailableSlots(params: CalculateSlotsParams): string[] 
     slotIntervalMinutes,
     existingBookings,
     manualBlockouts,
+    maxConcurrentBookings = 1,
   } = params;
   if (!Number.isInteger(serviceDuration) || serviceDuration <= 0) {
     throw new RangeError('A szolgáltatás időtartamának pozitív egész számnak kell lennie.');
@@ -118,6 +114,7 @@ export function calculateAvailableSlots(params: CalculateSlotsParams): string[] 
   if (!Number.isInteger(slotIntervalMinutes) || slotIntervalMinutes <= 0) {
     throw new RangeError('Az időpontok lépésközének pozitív egész számnak kell lennie.');
   }
+  const capacity = Math.max(1, Math.floor(maxConcurrentBookings));
 
   const availableSlots: string[] = [];
   
@@ -129,8 +126,11 @@ export function calculateAvailableSlots(params: CalculateSlotsParams): string[] 
   const slotDuration =
     Math.ceil(serviceDuration / slotIntervalMinutes) * slotIntervalMinutes;
 
-  // Összegyűjtjük az összes foglalt időszakot
-  const blockedRanges = getBlockedRanges(existingBookings, manualBlockouts, now);
+  const { blockoutRanges, bookingRanges } = partitionBlockedRanges(
+    existingBookings,
+    manualBlockouts,
+    now
+  );
 
   // Idősávok generálása és szűrése
   let currentSlotStart = startOfDayMin;
@@ -143,12 +143,22 @@ export function calculateAvailableSlots(params: CalculateSlotsParams): string[] 
       endMin: currentSlotEnd,
     };
 
-    // Megnézzük, van-e átfedés bármelyik blokkolt időszakkal
-    const hasConflict = blockedRanges.some((block) =>
+    const hasManualBlockout = blockoutRanges.some((block) =>
       isOverlapping(currentSlotRange, block)
     );
+    let overlappingBookingsCount = 0;
+    if (!hasManualBlockout) {
+      for (const range of bookingRanges) {
+        if (isOverlapping(currentSlotRange, range)) {
+          overlappingBookingsCount += 1;
+          if (overlappingBookingsCount >= capacity) {
+            break;
+          }
+        }
+      }
+    }
 
-    if (!hasConflict) {
+    if (!hasManualBlockout && overlappingBookingsCount < capacity) {
       availableSlots.push(minutesToTime(currentSlotStart));
     }
 
