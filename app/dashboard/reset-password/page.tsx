@@ -1,9 +1,20 @@
 "use client";
 
-import { useActionState } from "react";
+import type { EmailOtpType } from "@supabase/supabase-js";
+import { useActionState, useEffect } from "react";
 import { useLanguage } from "@/lib/i18n";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
+import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { updatePasswordAction, type ActionState } from "../actions";
+
+const ALLOWED_OTP_TYPES = new Set<EmailOtpType>([
+  "invite",
+  "recovery",
+  "email",
+  "signup",
+  "magiclink",
+  "email_change",
+]);
 
 const initialState: ActionState = {};
 
@@ -13,6 +24,56 @@ export default function ResetPasswordPage() {
     initialState,
   );
   const { t } = useLanguage();
+
+  useEffect(() => {
+    let active = true;
+    async function restoreAuthSessionFromUrl() {
+      if (typeof window === "undefined") return;
+      try {
+        const supabase = createSupabaseBrowserClient();
+        const searchParams = new URLSearchParams(window.location.search);
+        const code = searchParams.get("code");
+        const tokenHash = searchParams.get("token_hash");
+        const otpType = searchParams.get("type");
+
+        if (code && active) {
+          await supabase.auth.exchangeCodeForSession(code);
+          return;
+        }
+
+        if (
+          tokenHash &&
+          otpType &&
+          ALLOWED_OTP_TYPES.has(otpType as EmailOtpType) &&
+          active
+        ) {
+          await supabase.auth.verifyOtp({
+            token_hash: tokenHash,
+            type: otpType as EmailOtpType,
+          });
+          return;
+        }
+
+        if (window.location.hash.startsWith("#")) {
+          const hashParams = new URLSearchParams(window.location.hash.slice(1));
+          const accessToken = hashParams.get("access_token");
+          const refreshToken = hashParams.get("refresh_token");
+          if (accessToken && refreshToken && active) {
+            await supabase.auth.setSession({
+              access_token: accessToken,
+              refresh_token: refreshToken,
+            });
+          }
+        }
+      } catch {
+        // Ignore when browser auth env is unconfigured (e.g. unit tests) or token already consumed
+      }
+    }
+    void restoreAuthSessionFromUrl();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-12">
@@ -45,7 +106,7 @@ export default function ResetPasswordPage() {
             <input
               className="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"
               minLength={8}
-              name="passwordConfirm"
+              name="confirmPassword"
               required
               type="password"
             />

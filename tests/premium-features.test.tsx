@@ -13,7 +13,9 @@ import {
 } from "../lib/booking-emails";
 import { createIcsCalendarFeed, parseIcsEvents } from "../lib/calendar";
 import CancelBookingClient from "../app/cancel/[token]/CancelBookingClient";
+import ResetPasswordPage from "../app/dashboard/reset-password/page";
 import VisualCalendarView from "../app/dashboard/VisualCalendarView";
+import Home from "../app/page";
 
 const resendSendMock = vi.hoisted(() => vi.fn());
 
@@ -52,6 +54,7 @@ const serverSupabaseMock = vi.hoisted(() => ({
   auth: {
     getUser: vi.fn(),
     signOut: vi.fn(),
+    updateUser: vi.fn(),
   },
 }));
 
@@ -76,6 +79,7 @@ import {
   markBookingNoShowAction,
   rescheduleBookingByProviderAction,
   saveCustomerNoteAction,
+  updatePasswordAction,
   updateTenantPlanAction,
   updateTenantServiceAction,
 } from "../app/dashboard/actions";
@@ -1097,6 +1101,43 @@ describe("Starter vs. Pro (Prémium) Tier Separation, Security & Business Featur
       expect(
         screen.getByText(/48 órán belüli időpont online már nem mondható le/i),
       ).toBeInTheDocument();
+    });
+
+    it("supports invite/reset password confirmation field names and renders production Home SaaS landing page", async () => {
+      serverSupabaseMock.auth.updateUser.mockResolvedValue({ error: null });
+
+      const mismatchForm = new FormData();
+      mismatchForm.set("password", "SecretPass123!");
+      mismatchForm.set("confirmPassword", "Different123!");
+      const mismatchResult = await updatePasswordAction({}, mismatchForm);
+      expect(mismatchResult.error).toContain("nem egyezik");
+
+      const confirmForm = new FormData();
+      confirmForm.set("password", "SecretPass123!");
+      confirmForm.set("confirmPassword", "SecretPass123!");
+      const confirmResult = await updatePasswordAction({}, confirmForm);
+      expect(confirmResult.success).toContain("frissült");
+      expect(serverSupabaseMock.auth.updateUser).toHaveBeenCalledWith({
+        password: "SecretPass123!",
+      });
+
+      const legacyConfirmForm = new FormData();
+      legacyConfirmForm.set("password", "SecretPass123!");
+      legacyConfirmForm.set("passwordConfirm", "SecretPass123!");
+      const legacyResult = await updatePasswordAction({}, legacyConfirmForm);
+      expect(legacyResult.success).toContain("frissült");
+
+      const { unmount } = render(<ResetPasswordPage />);
+      expect(screen.getByLabelText(/Új jelszó megerősítése/i)).toHaveAttribute(
+        "name",
+        "confirmPassword",
+      );
+      unmount();
+
+      render(<Home />);
+      expect(screen.getByText("Alap (Starter)")).toBeInTheDocument();
+      expect(screen.getByText("Prémium (Pro)")).toBeInTheDocument();
+      expect(screen.getAllByRole("link", { name: /belépés/i }).length).toBeGreaterThan(0);
     });
   });
 });

@@ -383,8 +383,15 @@ export async function createTenantAction(
   }
 
   if (!ownerId) {
+    const baseUrl = (
+      process.env.NEXT_PUBLIC_SITE_URL ||
+      process.env.NEXT_PUBLIC_APP_URL ||
+      "http://localhost:3000"
+    ).replace(/\/+$/, "");
     const { data, error } =
-      await clients.admin.auth.admin.inviteUserByEmail(ownerEmail);
+      await clients.admin.auth.admin.inviteUserByEmail(ownerEmail, {
+        redirectTo: `${baseUrl}/dashboard/reset-password`,
+      });
     if (error || !data.user) {
       return {
         error: `A kapcsolattartó meghívása nem sikerült: ${error?.message ?? "A felhasználó nem jött létre."}`,
@@ -2203,7 +2210,9 @@ export async function updatePasswordAction(
   formData: FormData,
 ): Promise<ActionState> {
   const password = String(formData.get("password") ?? "");
-  const confirmPassword = String(formData.get("confirmPassword") ?? "");
+  const confirmPassword = String(
+    formData.get("confirmPassword") ?? formData.get("passwordConfirm") ?? "",
+  );
 
   if (password.length < 8 || password.length > 128) {
     return {
