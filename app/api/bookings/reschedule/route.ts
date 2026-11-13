@@ -100,6 +100,19 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+    if (
+      msg.includes("closed on the selected day") ||
+      msg.includes("outside business hours")
+    ) {
+      return Response.json(
+        {
+          error:
+            "A kiválasztott időpont nyitvatartási időn kívül esik, vagy nem érvényes idősáv.",
+          code: "OUTSIDE_BUSINESS_HOURS",
+        },
+        { status: 400 },
+      );
+    }
     return Response.json(
       {
         error: "A foglalás nem található vagy már le lett mondva.",

@@ -198,6 +198,77 @@ export function hashIdentifier(value: string) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+/**
+ * Validates that an external URL (e.g. Google Calendar iCal feed or review link)
+ * uses HTTPS (or webcal:// mapped to https://), has no embedded credentials,
+ * uses the default HTTPS port, and points to a public domain name (preventing SSRF
+ * against localhost, RFC1918 private networks, link-local / cloud metadata 169.254.169.254,
+ * and internal hostnames).
+ */
+export function isSafeExternalHttpsUrl(
+  rawUrl: string,
+  options?: { allowWebcal?: boolean },
+): boolean {
+  const trimmed = String(rawUrl ?? "").trim();
+  if (!trimmed || trimmed.length > 1000 || /\s/.test(trimmed)) {
+    return false;
+  }
+
+  const normalized =
+    options?.allowWebcal && /^webcal:\/\//i.test(trimmed)
+      ? trimmed.replace(/^webcal:\/\//i, "https://")
+      : trimmed;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    return false;
+  }
+
+  if (parsed.protocol !== "https:") {
+    return false;
+  }
+  if (parsed.username || parsed.password) {
+    return false;
+  }
+  if (parsed.port && parsed.port !== "443") {
+    return false;
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if (!host || !host.includes(".")) {
+    return false;
+  }
+
+  // Block IPv6 literals and internal / local TLDs
+  if (
+    host.startsWith("[") ||
+    host.endsWith("]") ||
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal") ||
+    host.endsWith(".lan") ||
+    host.endsWith(".home") ||
+    host.endsWith(".arpa")
+  ) {
+    return false;
+  }
+
+  // Block IPv4 literals (private, loopback, link-local metadata 169.254.169.254, or raw IPs)
+  if (/^\d+(\.\d+){0,3}$/.test(host) || /^0x[0-9a-f]+/i.test(host)) {
+    return false;
+  }
+
+  const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    return false;
+  }
+
+  return true;
+}
+
 export function extractClientIdentifier(request: Request): string | null {
   const forwardedFor = request.headers.get("x-forwarded-for");
   const realIp = request.headers.get("x-real-ip");

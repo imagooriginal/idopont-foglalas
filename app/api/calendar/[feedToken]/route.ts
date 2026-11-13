@@ -1,5 +1,9 @@
 import { createIcsCalendarFeed } from "@/lib/calendar";
-import { uuidSchema } from "@/lib/security";
+import {
+  checkRateLimit,
+  extractClientIdentifier,
+  uuidSchema,
+} from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 interface FeedBookingRow {
@@ -14,9 +18,22 @@ interface FeedBookingRow {
 }
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ feedToken: string }> },
 ) {
+  const clientId = extractClientIdentifier(request);
+  if (clientId) {
+    const rateLimit = checkRateLimit(
+      "calendar_feed",
+      clientId,
+      30,
+      10 * 60 * 1000,
+    );
+    if (!rateLimit.allowed) {
+      return new Response("Too many requests", { status: 429 });
+    }
+  }
+
   const { feedToken } = await context.params;
   const cleanToken = feedToken.replace(/\.ics$/i, "");
   const parsedToken = uuidSchema.safeParse(cleanToken);
@@ -107,11 +124,16 @@ export async function GET(
     events,
   );
 
+  const safeSlug =
+    String(company.slug ?? "")
+      .replace(/[^a-z0-9-_]/gi, "")
+      .slice(0, 64) || "provider";
+
   return new Response(icsContent, {
     status: 200,
     headers: {
       "Content-Type": "text/calendar; charset=utf-8",
-      "Content-Disposition": `inline; filename="${company.slug}-calendar.ics"`,
+      "Content-Disposition": `inline; filename="${safeSlug}-calendar.ics"`,
       "Cache-Control": "no-store, max-age=0",
     },
   });

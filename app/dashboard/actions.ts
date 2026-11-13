@@ -9,7 +9,12 @@ import {
   deliverCustomerCancellationNoticeEmail,
 } from "@/lib/booking-emails";
 import { parseIcsEvents } from "@/lib/calendar";
-import { checkRateLimit, hashIdentifier, uuidSchema } from "@/lib/security";
+import {
+  checkRateLimit,
+  hashIdentifier,
+  isSafeExternalHttpsUrl,
+  uuidSchema,
+} from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -1981,8 +1986,8 @@ const integrationsSchema = z.object({
     .trim()
     .max(500)
     .refine(
-      (val) => !val || /^https:\/\/[^\s]+$/i.test(val),
-      "A Google értékelési linknek https://-sel kell kezdődnie.",
+      (val) => !val || isSafeExternalHttpsUrl(val),
+      "A Google értékelési linknek biztonságos nyilvános https:// URL-nek kell lennie.",
     )
     .default(""),
   externalCalendarIcsUrl: z
@@ -1990,8 +1995,8 @@ const integrationsSchema = z.object({
     .trim()
     .max(1000)
     .refine(
-      (val) => !val || /^(https|webcal):\/\/[^\s]+$/i.test(val),
-      "Az iCal naptár-URL-nek https:// vagy webcal:// előtaggal kell kezdődnie.",
+      (val) => !val || isSafeExternalHttpsUrl(val, { allowWebcal: true }),
+      "Az iCal naptár-URL-nek biztonságos nyilvános https:// vagy webcal:// URL-nek kell lennie.",
     )
     .default(""),
   maxConcurrentBookings: z.number().int().min(1).max(50).optional(),
@@ -2074,6 +2079,19 @@ export async function syncExternalGoogleCalendarAction(
     return { error: "Érvénytelen szolgáltató-azonosító." };
   }
 
+  const rateLimit = checkRateLimit(
+    "gcal_sync",
+    companyIdResult.data,
+    5,
+    10 * 60 * 1000,
+  );
+  if (!rateLimit.allowed) {
+    return {
+      error:
+        "Túl sok szinkronizálási kérés rövid időn belül. Kérlek, várj néhány percet.",
+    };
+  }
+
   const supabase = await createSupabaseServerClient();
   const access = await verifyTenantCompanyAccess(
     supabase,
@@ -2098,20 +2116,21 @@ export async function syncExternalGoogleCalendarAction(
     };
   }
 
-  const fetchUrl = rawUrl.replace(/^webcal:\/\//i, "https://");
-  try {
-    const parsedUrl = new URL(fetchUrl);
-    if (parsedUrl.protocol !== "https:") {
-      return { error: "Csak HTTPS alapú naptár-URL szinkronizálható." };
-    }
-  } catch {
-    return { error: "Érvénytelen naptár-URL." };
+  if (!isSafeExternalHttpsUrl(rawUrl, { allowWebcal: true })) {
+    return {
+      error:
+        "A beállított naptár-URL nem biztonságos nyilvános HTTPS cím. Kérlek, ellenőrizd az iCal URL-t.",
+    };
   }
+
+  const fetchUrl = rawUrl.replace(/^webcal:\/\//i, "https://");
 
   let icsText = "";
   try {
     const response = await fetch(fetchUrl, {
       headers: { Accept: "text/calendar, text/plain, */*" },
+      redirect: "error",
+      signal: AbortSignal.timeout(8000),
     });
     if (!response.ok) {
       return {
@@ -2119,6 +2138,11 @@ export async function syncExternalGoogleCalendarAction(
       };
     }
     icsText = await response.text();
+    if (icsText.length > 1_000_000) {
+      return {
+        error: "A külső naptár fájl mérete meghaladja a megengedett 1 MB-ot.",
+      };
+    }
   } catch {
     return {
       error: "A külső Google Calendar elérése sikertelen volt.",
@@ -2132,8 +2156,25 @@ export async function syncExternalGoogleCalendarAction(
     (ev) => ev.end.getTime() > now && ev.start.getTime() <= horizon,
   );
 
+  const { data: existingBlockouts } = await supabase
+    .from("manual_blockouts")
+    .select("kezdes_ideje, vege_ideje")
+    .eq("cég_id", companyIdResult.data)
+    .gte("vege_ideje", new Date(now).toISOString());
+
+  const existingTimeKeys = new Set(
+    (existingBlockouts ?? []).map(
+      (b: { kezdes_ideje: string; vege_ideje: string }) =>
+        `${new Date(b.kezdes_ideje).getTime()}-${new Date(b.vege_ideje).getTime()}`,
+    ),
+  );
+
   let importedCount = 0;
   for (const ev of upcomingEvents.slice(0, 50)) {
+    const timeKey = `${ev.start.getTime()}-${ev.end.getTime()}`;
+    if (existingTimeKeys.has(timeKey)) {
+      continue;
+    }
     const note = `[GCal] ${ev.summary}`.slice(0, 200);
     const { error: blockoutErr } = await supabase.rpc("add_manual_blockout", {
       p_company_id: companyIdResult.data,
@@ -2142,6 +2183,7 @@ export async function syncExternalGoogleCalendarAction(
       p_note: note,
     });
     if (!blockoutErr) {
+      existingTimeKeys.add(timeKey);
       importedCount += 1;
     }
   }

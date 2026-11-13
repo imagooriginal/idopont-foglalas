@@ -860,6 +860,11 @@ declare
   v_duration_minutes integer;
   v_slot_duration integer;
   v_new_end timestamptz;
+  v_local_start timestamp without time zone;
+  v_local_close timestamp without time zone;
+  v_open time without time zone;
+  v_close time without time zone;
+  v_minutes_from_open integer;
   v_now timestamptz := clock_timestamp();
 begin
   if p_cancellation_token is null or p_new_start is null then
@@ -903,6 +908,30 @@ begin
     ceil(v_duration_minutes::numeric / v_company.slot_interval_minutes)::integer
       * v_company.slot_interval_minutes;
   v_new_end := p_new_start + make_interval(mins => v_duration_minutes);
+  v_local_start := p_new_start at time zone v_company.time_zone;
+
+  select h.opens_at, h.closes_at
+    into v_open, v_close
+  from public.company_business_hours h
+  where h.company_id = v_company.id
+    and h.weekday = extract(dow from v_local_start)::smallint;
+
+  if not found then
+    raise exception 'The company is closed on the selected day.';
+  end if;
+
+  v_local_close := v_local_start::date + v_close;
+  v_minutes_from_open := floor(
+    extract(epoch from (v_local_start - (v_local_start::date + v_open))) / 60
+  )::integer;
+
+  if v_local_start::date + v_open > v_local_start
+    or v_local_start + make_interval(mins => v_duration_minutes) > v_local_close
+    or v_local_start <> date_trunc('minute', v_local_start)
+    or mod(v_minutes_from_open, v_company.slot_interval_minutes) <> 0
+  then
+    raise exception 'The selected time is outside business hours or not a valid slot.';
+  end if;
 
   if (
     v_booking.staff_id is not null

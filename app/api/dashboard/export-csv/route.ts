@@ -13,9 +13,14 @@ interface ExportBookingRow {
   vege_ideje: string;
 }
 
-function escapeCsvCell(value: string | number | null | undefined): string {
-  const raw = String(value ?? "").replace(/\r?\n/g, " ").trim();
-  const safeFormula = /^[=+\-@]/.test(raw) ? `'${raw}` : raw;
+export function escapeCsvCell(value: string | number | null | undefined): string {
+  const rawString = String(value ?? "");
+  const startsWithFormulaTrigger = /^[\s\t\r\n]*[=+\-@]/.test(rawString);
+  const normalized = rawString.replace(/[\r\n\t]+/g, " ").trim();
+  const safeFormula =
+    startsWithFormulaTrigger || /^[=+\-@]/.test(normalized)
+      ? `'${normalized}`
+      : normalized;
   return `"${safeFormula.replace(/"/g, '""')}"`;
 }
 
@@ -136,11 +141,16 @@ export async function GET(request: Request) {
   // UTF-8 BOM (\uFEFF) + semicolon delimiter for seamless Hungarian Excel opening
   const csvContent = `\uFEFF${headers.map(escapeCsvCell).join(";")}\r\n${rows.join("\r\n")}\r\n`;
 
+  const safeSlug =
+    String(company.slug ?? "")
+      .replace(/[^a-z0-9-_]/gi, "")
+      .slice(0, 64) || "export";
+
   return new Response(csvContent, {
     status: 200,
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename="foglalasok-${company.slug}.csv"`,
+      "Content-Disposition": `attachment; filename="foglalasok-${safeSlug}.csv"`,
       "Cache-Control": "no-store",
     },
   });

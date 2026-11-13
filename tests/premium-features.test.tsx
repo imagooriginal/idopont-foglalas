@@ -86,7 +86,11 @@ import {
 import { POST as cancelPost } from "../app/api/bookings/cancel/route";
 import { POST as confirmPost } from "../app/api/bookings/confirm/route";
 import { POST as reschedulePost } from "../app/api/bookings/reschedule/route";
-import { GET as exportCsvGet } from "../app/api/dashboard/export-csv/route";
+import {
+  escapeCsvCell,
+  GET as exportCsvGet,
+} from "../app/api/dashboard/export-csv/route";
+import { isSafeExternalHttpsUrl } from "../lib/security";
 
 const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
 const SERVICE_ID = "22222222-2222-4222-8222-222222222222";
@@ -1138,6 +1142,62 @@ describe("Starter vs. Pro (Prémium) Tier Separation, Security & Business Featur
       expect(screen.getByText("Alap (Starter)")).toBeInTheDocument();
       expect(screen.getByText("Prémium (Pro)")).toBeInTheDocument();
       expect(screen.getAllByRole("link", { name: /belépés/i }).length).toBeGreaterThan(0);
+    });
+
+    it("blocks SSRF URLs in isSafeExternalHttpsUrl, sanitizes CSV formula vectors, and rejects out-of-hours rescheduling", async () => {
+      // 1. SSRF URL validation
+      expect(
+        isSafeExternalHttpsUrl(
+          "https://calendar.google.com/calendar/ical/test%40group.calendar.google.com/public/basic.ics",
+          { allowWebcal: true },
+        ),
+      ).toBe(true);
+      expect(
+        isSafeExternalHttpsUrl(
+          "webcal://calendar.google.com/calendar/ical/test/basic.ics",
+          { allowWebcal: true },
+        ),
+      ).toBe(true);
+      expect(isSafeExternalHttpsUrl("https://localhost/internal.ics", { allowWebcal: true })).toBe(false);
+      expect(isSafeExternalHttpsUrl("https://127.0.0.1/internal.ics", { allowWebcal: true })).toBe(false);
+      expect(isSafeExternalHttpsUrl("https://169.254.169.254/latest/meta-data/", { allowWebcal: true })).toBe(false);
+      expect(isSafeExternalHttpsUrl("https://192.168.1.1/admin.ics", { allowWebcal: true })).toBe(false);
+      expect(isSafeExternalHttpsUrl("https://[::1]/internal.ics", { allowWebcal: true })).toBe(false);
+      expect(isSafeExternalHttpsUrl("https://calendar.google.com:8443/basic.ics", { allowWebcal: true })).toBe(false);
+      expect(isSafeExternalHttpsUrl("https://user:pass@calendar.google.com/basic.ics", { allowWebcal: true })).toBe(false);
+      expect(isSafeExternalHttpsUrl("http://calendar.google.com/basic.ics", { allowWebcal: true })).toBe(false);
+
+      // 2. CSV formula injection hardening (including leading tab/CR vectors)
+      expect(escapeCsvCell("=CMD|' /C calc'!A0")).toBe("\"'=CMD|' /C calc'!A0\"");
+      expect(escapeCsvCell("\t=SUM(A1:A2)")).toBe("\"'=SUM(A1:A2)\"");
+      expect(escapeCsvCell("\r+1+1")).toBe("\"'+1+1\"");
+
+      // 3. Reschedule outside business hours returns 400 OUTSIDE_BUSINESS_HOURS
+      publicSupabaseMock.rpc.mockResolvedValue({
+        data: null,
+        error: {
+          message:
+            "The selected time is outside business hours or not a valid slot.",
+        },
+      });
+
+      const response = await reschedulePost(
+        new Request("http://localhost/api/bookings/reschedule", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": "203.0.113.77",
+          },
+          body: JSON.stringify({
+            token: CANCEL_TOKEN,
+            newStart: "2030-07-14T03:17:00.000Z",
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      const payload = await response.json();
+      expect(payload.code).toBe("OUTSIDE_BUSINESS_HOURS");
     });
   });
 });
