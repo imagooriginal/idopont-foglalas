@@ -18,6 +18,7 @@ export interface Booking {
 export interface ManualBlockout {
   start: string; // HH:mm
   end: string;   // HH:mm
+  blockedThreads?: number | null;
 }
 
 export interface CalculateSlotsParams {
@@ -33,6 +34,10 @@ export interface CalculateSlotsParams {
 interface TimeRange {
   startMin: number;
   endMin: number;
+}
+
+interface BlockoutTimeRange extends TimeRange {
+  blockedThreads: number;
 }
 
 // --- Segédfüggvények ---
@@ -69,11 +74,18 @@ function isOverlapping(slot: TimeRange, block: TimeRange): boolean {
 function partitionBlockedRanges(
   bookings: Booking[],
   blockouts: ManualBlockout[],
-  now: Date
-): { blockoutRanges: TimeRange[]; bookingRanges: TimeRange[] } {
-  const blockoutRanges: TimeRange[] = blockouts.map((block) => ({
+  now: Date,
+  capacity: number,
+): { blockoutRanges: BlockoutTimeRange[]; bookingRanges: TimeRange[] } {
+  const blockoutRanges: BlockoutTimeRange[] = blockouts.map((block) => ({
     startMin: timeToMinutes(block.start),
     endMin: timeToMinutes(block.end),
+    blockedThreads:
+      block.blockedThreads != null &&
+      Number.isFinite(block.blockedThreads) &&
+      block.blockedThreads > 0
+        ? Math.floor(block.blockedThreads)
+        : capacity,
   }));
 
   const bookingRanges: TimeRange[] = [];
@@ -129,7 +141,8 @@ export function calculateAvailableSlots(params: CalculateSlotsParams): string[] 
   const { blockoutRanges, bookingRanges } = partitionBlockedRanges(
     existingBookings,
     manualBlockouts,
-    now
+    now,
+    capacity,
   );
 
   // Idősávok generálása és szűrése
@@ -143,22 +156,29 @@ export function calculateAvailableSlots(params: CalculateSlotsParams): string[] 
       endMin: currentSlotEnd,
     };
 
-    const hasManualBlockout = blockoutRanges.some((block) =>
-      isOverlapping(currentSlotRange, block)
-    );
+    let overlappingBlockedThreads = 0;
+    for (const block of blockoutRanges) {
+      if (isOverlapping(currentSlotRange, block)) {
+        overlappingBlockedThreads += block.blockedThreads;
+        if (overlappingBlockedThreads >= capacity) {
+          break;
+        }
+      }
+    }
+
     let overlappingBookingsCount = 0;
-    if (!hasManualBlockout) {
+    if (overlappingBlockedThreads < capacity) {
       for (const range of bookingRanges) {
         if (isOverlapping(currentSlotRange, range)) {
           overlappingBookingsCount += 1;
-          if (overlappingBookingsCount >= capacity) {
+          if (overlappingBookingsCount + overlappingBlockedThreads >= capacity) {
             break;
           }
         }
       }
     }
 
-    if (!hasManualBlockout && overlappingBookingsCount < capacity) {
+    if (overlappingBookingsCount + overlappingBlockedThreads < capacity) {
       availableSlots.push(minutesToTime(currentSlotStart));
     }
 

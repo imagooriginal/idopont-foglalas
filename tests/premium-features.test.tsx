@@ -73,6 +73,7 @@ vi.mock("../lib/supabase/server", () => ({
 import {
   addBlacklistEntryAction,
   cancelBookingByProviderAction,
+  createBlockoutAction,
   createManualBookingAction,
   createStaffMemberAction,
   createTenantServiceAction,
@@ -83,6 +84,7 @@ import {
   updateTenantPlanAction,
   updateTenantServiceAction,
 } from "../app/dashboard/actions";
+import BlockoutManager from "../app/dashboard/BlockoutManager";
 import { POST as cancelPost } from "../app/api/bookings/cancel/route";
 import { POST as confirmPost } from "../app/api/bookings/confirm/route";
 import { POST as reschedulePost } from "../app/api/bookings/reschedule/route";
@@ -1198,6 +1200,125 @@ describe("Starter vs. Pro (Prémium) Tier Separation, Security & Business Featur
       expect(response.status).toBe(400);
       const payload = await response.json();
       expect(payload.code).toBe("OUTSIDE_BUSINESS_HOURS");
+    });
+
+    it("returns specific Hungarian reasons for manual booking conflicts and supports partial-thread blockouts", async () => {
+      serverSupabaseMock.auth.getUser.mockResolvedValue({
+        data: { user: { id: "owner-1", email: "owner@example.com" } },
+        error: null,
+      });
+      serverSupabaseMock.from.mockImplementation((table: string) => {
+        if (table === "companies") {
+          return {
+            select: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({
+                  data: {
+                    id: COMPANY_ID,
+                    owner_id: "owner-1",
+                    status: "active",
+                    plan: "pro",
+                    can_edit_prices: true,
+                    can_manage_services_advanced: true,
+                  },
+                  error: null,
+                }),
+              }),
+            }),
+          };
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      });
+
+      // 1. Specific error reasons in createManualBookingAction
+      const baseManualForm = () => {
+        const fd = new FormData();
+        fd.set("companyId", COMPANY_ID);
+        fd.set("serviceId", SERVICE_ID);
+        fd.set("customerName", "Kézi Ügyfél");
+        fd.set("customerPhone", "+36301234567");
+        fd.set("startsAt", "2030-07-15T10:00:00.000Z");
+        return fd;
+      };
+
+      serverSupabaseMock.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { message: "The selected time slot falls within a blocked period." },
+      });
+      const blockedRes = await createManualBookingAction({}, baseManualForm());
+      expect(blockedRes.error).toContain("blokkolva van");
+
+      serverSupabaseMock.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { message: "The selected time slot is already fully booked." },
+      });
+      const bookedRes = await createManualBookingAction({}, baseManualForm());
+      expect(bookedRes.error).toContain("már foglalt");
+
+      serverSupabaseMock.rpc.mockResolvedValueOnce({
+        data: null,
+        error: {
+          message: "There is no free thread capacity left for the selected time slot.",
+        },
+      });
+      const capacityRes = await createManualBookingAction({}, baseManualForm());
+      expect(capacityRes.error).toContain("nincs szabad kapacitás");
+
+      // 2. Partial-thread blockout submission passes p_blocked_threads
+      serverSupabaseMock.rpc.mockResolvedValueOnce({
+        data: "99999999-9999-4999-8999-999999999999",
+        error: null,
+      });
+      const blockoutForm = new FormData();
+      blockoutForm.set("companyId", COMPANY_ID);
+      blockoutForm.set("startsAt", "2030-07-15T08:00:00.000Z");
+      blockoutForm.set("endsAt", "2030-07-15T12:00:00.000Z");
+      blockoutForm.set("note", "Kovács Anna szabadság");
+      blockoutForm.set("blockedThreads", "2");
+      const blockoutRes = await createBlockoutAction({}, blockoutForm);
+      expect(blockoutRes.error).toBeUndefined();
+      expect(blockoutRes.success).toContain("elmentettük");
+      expect(serverSupabaseMock.rpc).toHaveBeenLastCalledWith(
+        "add_manual_blockout",
+        expect.objectContaining({
+          p_company_id: COMPANY_ID,
+          p_blocked_threads: 2,
+          p_note: "Kovács Anna szabadság",
+        }),
+      );
+
+      // 3. BlockoutManager displays partial leave badge and thread selector for capacity > 1
+      const user = userEvent.setup();
+      render(
+        <BlockoutManager
+          blockouts={[
+            {
+              id: "bl-partial",
+              kezdes_ideje: "2030-07-15T08:00:00.000Z",
+              vege_ideje: "2030-07-15T12:00:00.000Z",
+              megjegyzes: "Kovács Anna szabadság",
+              blocked_threads: 2,
+            },
+          ]}
+          companyId={COMPANY_ID}
+          maxConcurrentBookings={3}
+          timeZone="Europe/Budapest"
+        />,
+      );
+
+      expect(
+        screen.getByText("Részleges szabadság: 2 szál blokkolva"),
+      ).toBeInTheDocument();
+
+      await user.click(
+        screen.getAllByRole("button", { name: "Zárvatartás hozzáadása" })[0],
+      );
+      expect(
+        screen.getByLabelText("Érintett szálak / munkatársak"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("1 szál szabadságon / szüneten (marad 2 aktív szál)"),
+      ).toBeInTheDocument();
     });
   });
 });

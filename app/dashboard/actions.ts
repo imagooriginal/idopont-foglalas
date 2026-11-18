@@ -111,6 +111,7 @@ const blockoutSchema = z
       .string()
       .refine((v) => Number.isFinite(new Date(v).getTime())),
     note: z.string().trim().max(200),
+    blockedThreads: z.number().int().min(1).max(50).nullable().optional(),
   })
   .refine((data) => {
     const start = new Date(data.startsAt);
@@ -156,8 +157,29 @@ function sanitizeDatabaseError(
 ): string {
   console.error(fallbackPrefix, error);
   const message = error?.message ?? "";
+  if (message.includes("falls within a blocked period")) {
+    return `${fallbackPrefix}: A kiválasztott idősáv blokkolva van (zárvatartás / szabadság).`;
+  }
+  if (message.includes("already fully booked")) {
+    return `${fallbackPrefix}: A kiválasztott időpont már foglalt (minden párhuzamos szál betelt).`;
+  }
+  if (message.includes("no free thread capacity")) {
+    return `${fallbackPrefix}: A kiválasztott idősávban nincs szabad kapacitás (a meglévő foglalások és a szabadságon lévő szálak miatt minden hely betelt).`;
+  }
+  if (message.includes("staff member already has a booking")) {
+    return `${fallbackPrefix}: A kiválasztott munkatársnak ebben az idősávban már van másik foglalása.`;
+  }
+  if (message.includes("conflicts with an existing booking or blockout")) {
+    return `${fallbackPrefix}: A kiválasztott idősáv blokkolva van (zárvatartás / szabadság), vagy az időpont már foglalt.`;
+  }
   if (message.includes("conflicts with an active booking")) {
-    return `${fallbackPrefix}: Az időszak ütközik egy aktív foglalással.`;
+    return `${fallbackPrefix}: Az időszak ütközik egy aktív foglalással (nem maradna elég szabad szál a meglévő foglalásokhoz).`;
+  }
+  if (message.includes("invalid or inactive")) {
+    return `${fallbackPrefix}: A kiválasztott szolgáltatás inaktív vagy nem található.`;
+  }
+  if (message.includes("valid future time")) {
+    return `${fallbackPrefix}: Csak érvényes, jövőbeli időszak adható meg.`;
   }
   if (message.includes("At least one valid opening day is required")) {
     return `${fallbackPrefix}: Legalább egy nyitvatartási nap megadása kötelező.`;
@@ -899,11 +921,20 @@ export async function createBlockoutAction(
   _previousState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
+  const rawBlockedThreads = String(
+    formData.get("blockedThreads") ?? "",
+  ).trim();
+  const parsedBlockedThreads =
+    rawBlockedThreads && rawBlockedThreads !== "all"
+      ? Number(rawBlockedThreads)
+      : null;
+
   const parsed = blockoutSchema.safeParse({
     companyId: String(formData.get("companyId") ?? ""),
     startsAt: String(formData.get("startsAt") ?? ""),
     endsAt: String(formData.get("endsAt") ?? ""),
     note: String(formData.get("note") ?? ""),
+    blockedThreads: parsedBlockedThreads,
   });
 
   if (!parsed.success) {
@@ -924,17 +955,51 @@ export async function createBlockoutAction(
 
   const startDate = new Date(parsed.data.startsAt);
   const endDate = new Date(parsed.data.endsAt);
+  const startIso = startDate.toISOString();
+  const endIso = endDate.toISOString();
+  const blockedThreads = parsed.data.blockedThreads ?? null;
 
-  const { error } = await supabase.rpc("add_manual_blockout", {
-    p_company_id: parsed.data.companyId,
-    p_start: startDate.toISOString(),
-    p_end: endDate.toISOString(),
-    p_note: parsed.data.note || null,
-  });
+  let rpcError: { message?: string; code?: string } | null = null;
+  if (blockedThreads !== null) {
+    const { error } = await supabase.rpc("add_manual_blockout", {
+      p_company_id: parsed.data.companyId,
+      p_start: startIso,
+      p_end: endIso,
+      p_note: parsed.data.note || null,
+      p_blocked_threads: blockedThreads,
+    });
+    if (
+      error &&
+      (error.code === "PGRST202" ||
+        (error.message ?? "").includes("Could not find the function"))
+    ) {
+      const fallbackNote = `[${blockedThreads} szál] ${parsed.data.note || "Szabadság"}`.slice(
+        0,
+        200,
+      );
+      const fallbackRes = await supabase.rpc("add_manual_blockout", {
+        p_company_id: parsed.data.companyId,
+        p_start: startIso,
+        p_end: endIso,
+        p_note: fallbackNote,
+      });
+      rpcError = fallbackRes.error;
+    } else {
+      rpcError = error;
+    }
+  } else {
+    const { error } = await supabase.rpc("add_manual_blockout", {
+      p_company_id: parsed.data.companyId,
+      p_start: startIso,
+      p_end: endIso,
+      p_note: parsed.data.note || null,
+    });
+    rpcError = error;
+  }
 
-  if (error) {
+  if (rpcError) {
     return {
-      error: sanitizeDatabaseError("A blokkolás mentése nem sikerült", error),
+      error: sanitizeDatabaseError("A blokkolás mentése nem sikerült", rpcError),
     };
   }
 
@@ -1350,6 +1415,107 @@ export async function createManualBookingAction(
   );
 
   if (error) {
+    if ((error.message ?? "").includes("conflicts with an existing booking or blockout")) {
+      try {
+        const [{ data: serviceRow }, { data: companyRow }] = await Promise.all([
+          supabase
+            .from("services")
+            .select("idotartam_percben")
+            .eq("id", parsed.data.serviceId)
+            .eq("cég_id", parsed.data.companyId)
+            .maybeSingle(),
+          supabase
+            .from("companies")
+            .select("max_concurrent_bookings, slot_interval_minutes")
+            .eq("id", parsed.data.companyId)
+            .maybeSingle(),
+        ]);
+
+        const durationMinutes = Math.max(
+          5,
+          Number(serviceRow?.idotartam_percben ?? 30),
+        );
+        const intervalMinutes = Math.max(
+          5,
+          Number(companyRow?.slot_interval_minutes ?? 15),
+        );
+        const slotMinutes =
+          Math.ceil(durationMinutes / intervalMinutes) * intervalMinutes;
+        const windowEndIso = new Date(
+          new Date(startIso).getTime() + slotMinutes * 60_000,
+        ).toISOString();
+        const capacity = Math.max(
+          1,
+          Number(companyRow?.max_concurrent_bookings ?? 1),
+        );
+
+        const [{ data: overlapBlockouts }, { data: overlapBookings }] =
+          await Promise.all([
+            supabase
+              .from("manual_blockouts")
+              .select("*")
+              .eq("cég_id", parsed.data.companyId)
+              .lt("kezdes_ideje", windowEndIso)
+              .gt("vege_ideje", startIso),
+            supabase
+              .from("bookings")
+              .select("id, status, locked_until")
+              .eq("cég_id", parsed.data.companyId)
+              .in("status", ["pending", "confirmed"])
+              .lt("kezdes_ideje", windowEndIso)
+              .gt("vege_ideje", startIso),
+          ]);
+
+        let blockedThreads = 0;
+        for (const bl of (overlapBlockouts ?? []) as Array<{
+          blocked_threads?: number | null;
+          megjegyzes?: string | null;
+        }>) {
+          const tagMatch = /^\[(\d+)\s+szál\]/i.exec(bl.megjegyzes ?? "");
+          const explicit =
+            typeof bl.blocked_threads === "number" && bl.blocked_threads > 0
+              ? bl.blocked_threads
+              : tagMatch
+                ? Number.parseInt(tagMatch[1], 10)
+                : null;
+          blockedThreads += explicit !== null ? explicit : capacity;
+        }
+
+        const nowMs = Date.now();
+        const activeBookingsCount = (
+          (overlapBookings ?? []) as Array<{
+            status: string;
+            locked_until?: string | null;
+          }>
+        ).filter(
+          (b) =>
+            b.status === "confirmed" ||
+            (b.locked_until ? new Date(b.locked_until).getTime() > nowMs : false),
+        ).length;
+
+        if (blockedThreads >= capacity) {
+          return {
+            error:
+              "A kézi foglalás mentése nem sikerült: A kiválasztott idősáv blokkolva van (zárvatartás / szabadság van érvényben).",
+          };
+        }
+        if (activeBookingsCount >= capacity) {
+          return {
+            error:
+              "A kézi foglalás mentése nem sikerült: A kiválasztott időpont már foglalt (minden párhuzamos szál betelt).",
+          };
+        }
+        if (blockedThreads > 0 && activeBookingsCount + blockedThreads >= capacity) {
+          return {
+            error:
+              "A kézi foglalás mentése nem sikerült: A kiválasztott idősávban nincs szabad kapacitás (a szabadságon lévő szálak mellett a maradék helyek már foglaltak).",
+          };
+        }
+      } catch {
+        // Fall through to generic conflict message below
+      }
+    }
+
     return {
       error: sanitizeDatabaseError("A kézi foglalás mentése nem sikerült", error),
     };

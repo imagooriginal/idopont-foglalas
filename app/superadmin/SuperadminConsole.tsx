@@ -1071,6 +1071,12 @@ function TenantTable({
                 >
                   Szolgáltatások
                 </button>
+                <a
+                  className="rounded-xl border border-blue-200 bg-blue-50/70 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-100"
+                  href={`/dashboard?company=${company.id}`}
+                >
+                  Dashboard ↗
+                </a>
               </div>
             </article>
             {isExpanded && (
@@ -1309,13 +1315,21 @@ export default function SuperadminConsole({
                           {c.cancellation_window_hours ?? 24} óra
                         </td>
                         <td className="py-2.5 text-right">
-                          <button
-                            className="rounded-lg bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
-                            onClick={() => handleJumpToEdit(c.id)}
-                            type="button"
-                          >
-                            Szerkesztés megnyitása
-                          </button>
+                          <div className="inline-flex items-center gap-2">
+                            <button
+                              className="rounded-lg bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                              onClick={() => handleJumpToEdit(c.id)}
+                              type="button"
+                            >
+                              Szerkesztés megnyitása
+                            </button>
+                            <a
+                              className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                              href={`/dashboard?company=${c.id}`}
+                            >
+                              Dashboard ↗
+                            </a>
+                          </div>
                         </td>
                       </tr>
                     ))}

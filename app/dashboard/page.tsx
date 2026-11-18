@@ -324,16 +324,41 @@ export default async function DashboardPage({
   const { data: userData, error: authError } = await supabase.auth.getUser();
   if (authError || !userData.user) redirect("/dashboard/login");
 
-  const { data: companies, error: companiesError } = await supabase
+  const companySelectColumns =
+    "id, nev, slug, status, plan, time_zone, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, nyitvatartas_kezdet, nyitvatartas_vege, google_review_url, calendar_feed_token, external_calendar_ics_url, external_calendar_last_synced_at, max_concurrent_bookings, cancellation_window_hours";
+
+  const { data: ownedCompanies, error: companiesError } = await supabase
     .from("companies")
-    .select(
-      "id, nev, slug, status, plan, time_zone, can_manage_services, can_edit_prices, can_manage_services_advanced, custom_booking_fields, nyitvatartas_kezdet, nyitvatartas_vege, google_review_url, calendar_feed_token, external_calendar_ics_url, external_calendar_last_synced_at, max_concurrent_bookings, cancellation_window_hours",
-    )
-    .eq("owner_id", userData.user.id);
+    .select(companySelectColumns)
+    .eq("owner_id", userData.user.id)
+    .order("id", { ascending: true });
 
   if (companiesError) throw new Error(`Cégek betöltése nem sikerült: ${companiesError.message}`);
 
-  if (!companies?.length) {
+  const { company: requestedCompanyId } = await searchParams;
+  const companies = [...(ownedCompanies ?? [])];
+  let company =
+    companies.find((item) => item.id === requestedCompanyId) ?? null;
+
+  if (!company && requestedCompanyId) {
+    const { data: isPlatformAdmin } = await supabase.rpc("is_platform_admin");
+    if (isPlatformAdmin === true) {
+      const { data: adminTargetCompany } = await supabase
+        .from("companies")
+        .select(companySelectColumns)
+        .eq("id", requestedCompanyId)
+        .maybeSingle();
+      if (adminTargetCompany) {
+        company = adminTargetCompany;
+      }
+    }
+  }
+
+  if (!company) {
+    company = companies[0] ?? null;
+  }
+
+  if (!company) {
     return (
       <DashboardShell email={userData.user.email ?? ""}>
         <section
@@ -361,10 +386,6 @@ export default async function DashboardPage({
       </DashboardShell>
     );
   }
-
-  const { company: requestedCompanyId } = await searchParams;
-  const company =
-    companies.find((item) => item.id === requestedCompanyId) ?? companies[0];
   const customFieldLabels = new Map<string, string>(
     (Array.isArray(company.custom_booking_fields)
       ? company.custom_booking_fields
@@ -398,7 +419,7 @@ export default async function DashboardPage({
       .limit(50),
     supabase
       .from("manual_blockouts")
-      .select("id, kezdes_ideje, vege_ideje, megjegyzes")
+      .select("*")
       .eq("cég_id", company.id)
       .gte("vege_ideje", now)
       .order("kezdes_ideje", { ascending: true })
@@ -675,6 +696,32 @@ export default async function DashboardPage({
               </a>
             </p>
           </div>
+          {companies.length > 1 && (
+            <nav
+              aria-label="Saját fiókodhoz tartozó szolgáltatók"
+              className="flex flex-wrap items-center gap-2"
+            >
+              <span className="text-xs font-semibold text-slate-500">
+                Saját szolgáltatóid:
+              </span>
+              {companies.map((item) => {
+                const isSelected = item.id === company.id;
+                return (
+                  <a
+                    className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition ${
+                      isSelected
+                        ? "border-blue-600 bg-blue-50 text-blue-800 shadow-xs"
+                        : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                    }`}
+                    href={`/dashboard?company=${item.id}`}
+                    key={item.id}
+                  >
+                    {item.nev}
+                  </a>
+                );
+              })}
+            </nav>
+          )}
         </section>
 
         <section aria-label="Foglalási összesítő" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -864,6 +911,8 @@ export default async function DashboardPage({
           <BlockoutManager
             blockouts={blockouts}
             companyId={company.id}
+            key={company.id}
+            maxConcurrentBookings={(company as { max_concurrent_bookings?: number | null }).max_concurrent_bookings ?? 1}
             timeZone={timeZone}
           />
         </div>
@@ -891,10 +940,11 @@ export default async function DashboardPage({
         />
         <ManualBookingManager
           companyId={company.id}
+          key={company.id}
           services={servicesResult.data ?? []}
           timeZone={timeZone}
         />
-        <StaffManager companyId={company.id} staff={staffMembers} />
+        <StaffManager companyId={company.id} key={company.id} staff={staffMembers} />
         <BusinessHoursManager
           companyId={company.id}
           hours={businessHoursResult.data ?? []}
@@ -920,6 +970,7 @@ export default async function DashboardPage({
           externalCalendarIcsUrl={(company as { external_calendar_ics_url?: string | null }).external_calendar_ics_url ?? null}
           externalCalendarLastSyncedAt={(company as { external_calendar_last_synced_at?: string | null }).external_calendar_last_synced_at ?? null}
           googleReviewUrl={(company as { google_review_url?: string | null }).google_review_url ?? null}
+          key={company.id}
           maxConcurrentBookings={(company as { max_concurrent_bookings?: number | null }).max_concurrent_bookings ?? 1}
           notes={notesList}
           plan={companyPlan}

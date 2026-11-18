@@ -13,6 +13,23 @@ interface Blockout {
   kezdes_ideje: string;
   vege_ideje: string;
   megjegyzes: string | null;
+  blocked_threads?: number | null;
+}
+
+function parseBlockoutMeta(blockout: Blockout): {
+  threads: number | null;
+  noteText: string;
+} {
+  const rawNote = blockout.megjegyzes ?? "";
+  const tagMatch = /^\[(\d+)\s+szál\]\s*(.*)$/i.exec(rawNote);
+  const taggedThreads = tagMatch ? Number.parseInt(tagMatch[1], 10) : null;
+  const threads =
+    typeof blockout.blocked_threads === "number" && blockout.blocked_threads > 0
+      ? blockout.blocked_threads
+      : taggedThreads;
+  const noteText =
+    (tagMatch ? tagMatch[2] : rawNote).trim() || "Blokkolt időszak";
+  return { threads, noteText };
 }
 
 const initialState: ActionState = {};
@@ -80,10 +97,12 @@ export default function BlockoutManager({
   companyId,
   timeZone,
   blockouts,
+  maxConcurrentBookings = 1,
 }: {
   companyId: string;
   timeZone: string;
   blockouts: Blockout[];
+  maxConcurrentBookings?: number;
 }) {
   const [open, setOpen] = useState(false);
   const [start, setStart] = useState("");
@@ -167,15 +186,37 @@ export default function BlockoutManager({
         </div>
       ) : (
         <ul className="mt-5 space-y-3">
-          {blockouts.map((blockout) => (
+          {blockouts.map((blockout) => {
+            const { threads, noteText } = parseBlockoutMeta(blockout);
+            const showScopeBadge = maxConcurrentBookings > 1 || threads !== null;
+            const isPartial =
+              threads !== null &&
+              (maxConcurrentBookings <= 1 || threads < maxConcurrentBookings);
+            return (
             <li
               className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3.5 transition hover:border-slate-300 hover:bg-slate-50/70"
               key={blockout.id}
             >
               <div className="min-w-0">
-                <p className="font-semibold text-slate-900">
-                  {blockout.megjegyzes || "Blokkolt időszak"}
-                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-semibold text-slate-900">{noteText}</p>
+                  {showScopeBadge && (
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${
+                        isPartial
+                          ? "bg-amber-50 text-amber-800 ring-amber-200"
+                          : "bg-rose-50 text-rose-700 ring-rose-200"
+                      }`}
+                    >
+                      {isPartial
+                        ? t(
+                            `Részleges szabadság: ${threads} szál blokkolva`,
+                            `Partial leave: ${threads} thread(s) blocked`,
+                          )
+                        : t("Teljes zárvatartás", "Full closure")}
+                    </span>
+                  )}
+                </div>
                 <p className="mt-1 text-sm text-slate-600">
                   {new Intl.DateTimeFormat("hu-HU", {
                     dateStyle: "medium",
@@ -201,7 +242,8 @@ export default function BlockoutManager({
                 </button>
               </form>
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
 
@@ -298,6 +340,37 @@ export default function BlockoutManager({
                 type="text"
               />
             </label>
+            {maxConcurrentBookings > 1 && (
+              <label className="block space-y-1.5 text-sm font-medium">
+                {t("Érintett szálak / munkatársak", "Affected threads / workers")}
+                <select
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                  defaultValue=""
+                  name="blockedThreads"
+                >
+                  <option value="">
+                    {t(
+                      `Teljes zárvatartás – minden szál leáll (${maxConcurrentBookings} szál)`,
+                      `Full closure – block all ${maxConcurrentBookings} threads`,
+                    )}
+                  </option>
+                  {Array.from(
+                    { length: Math.max(0, maxConcurrentBookings - 1) },
+                    (_, index) => index + 1,
+                  ).map((count) => {
+                    const remaining = maxConcurrentBookings - count;
+                    return (
+                      <option key={count} value={String(count)}>
+                        {t(
+                          `${count} szál szabadságon / szüneten (marad ${remaining} aktív szál)`,
+                          `${count} thread(s) on leave (${remaining} remain active)`,
+                        )}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+            )}
             <p className="text-xs text-slate-500">
               A helyi időzóna: {timeZone}
             </p>

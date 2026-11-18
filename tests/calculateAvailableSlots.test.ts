@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   calculateAvailableSlots,
+  type Booking,
   type CalculateSlotsParams,
 } from "../lib/calculateAvailableSlots";
 
@@ -135,5 +136,36 @@ describe("calculateAvailableSlots", () => {
         maxConcurrentBookings: 3,
       }),
     ).toEqual(["09:00", "10:00", "10:30"]);
+  });
+
+  it("részleges szál-szabadság esetén csak a megadott szálakat tiltja, a többi aktív szál foglalható marad", () => {
+    const bookings: Booking[] = [
+      { id: "b1", start: "09:00", end: "09:30", status: "confirmed" },
+      { id: "b2", start: "09:00", end: "09:30", status: "confirmed" },
+    ];
+
+    // Kapacitás = 3, 1 szál szabadságon 09:00-10:00 -> 09:00-ra már 2 foglalás + 1 szabadság = 3 (betelt!),
+    // 09:30-ra viszont csak 0 foglalás + 1 szabadság = 1 < 3 (még szabad 2 hely!).
+    expect(
+      calculateAvailableSlots({
+        ...defaultParams,
+        existingBookings: bookings,
+        manualBlockouts: [{ start: "09:00", end: "10:00", blockedThreads: 1 }],
+        maxConcurrentBookings: 3,
+      }),
+    ).toEqual(["09:30", "10:00", "10:30"]);
+
+    // Ha két részleges szabadság összeadódik (1 + 2 = 3), az egész 09:30-10:00 sáv betelik
+    expect(
+      calculateAvailableSlots({
+        ...defaultParams,
+        existingBookings: bookings,
+        manualBlockouts: [
+          { start: "09:00", end: "10:00", blockedThreads: 1 },
+          { start: "09:30", end: "10:00", blockedThreads: 2 },
+        ],
+        maxConcurrentBookings: 3,
+      }),
+    ).toEqual(["10:00", "10:30"]);
   });
 });

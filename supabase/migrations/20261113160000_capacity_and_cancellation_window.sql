@@ -35,6 +35,120 @@ grant update (max_concurrent_bookings, cancellation_window_hours)
 alter table public.bookings
   drop constraint if exists bookings_no_overlapping_active_periods;
 
+-- 2b. Support partial-thread vacations/breaks in manual_blockouts
+alter table public.manual_blockouts
+  add column if not exists blocked_threads integer default null;
+
+alter table public.manual_blockouts
+  drop constraint if exists manual_blockouts_blocked_threads_check;
+
+alter table public.manual_blockouts
+  add constraint manual_blockouts_blocked_threads_check
+  check (blocked_threads is null or blocked_threads between 1 and 50);
+
+grant select (blocked_threads), insert (blocked_threads)
+  on public.manual_blockouts to authenticated;
+
+drop function if exists public.add_manual_blockout(uuid, timestamptz, timestamptz, text);
+drop function if exists public.add_manual_blockout(uuid, timestamptz, timestamptz, text, integer);
+
+create or replace function public.add_manual_blockout(
+  p_company_id uuid,
+  p_start timestamptz,
+  p_end timestamptz,
+  p_note text default null,
+  p_blocked_threads integer default null
+)
+returns uuid
+language plpgsql
+volatile
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_blockout_id uuid;
+  v_capacity integer;
+  v_threads_to_block integer;
+  v_now timestamptz := clock_timestamp();
+begin
+  if auth.uid() is null then
+    raise exception 'Authentication is required.';
+  end if;
+  if p_start is null or p_end is null or p_end <= p_start or p_start <= v_now then
+    raise exception 'Enter a valid future time range.';
+  end if;
+
+  select greatest(1, coalesce(c.max_concurrent_bookings, 1))
+    into v_capacity
+  from public.companies c
+  where c.id = p_company_id
+    and (
+      c.owner_id = (select auth.uid())
+      or (select public.is_platform_admin())
+    )
+  for update;
+
+  if not found then
+    raise exception 'You are not allowed to manage this company.';
+  end if;
+
+  v_threads_to_block := case
+    when p_blocked_threads is null or p_blocked_threads >= v_capacity then v_capacity
+    else greatest(1, p_blocked_threads)
+  end;
+
+  if exists (
+    select 1
+    from public.bookings b_ref
+    where b_ref.cég_id = p_company_id
+      and b_ref.status in ('pending', 'confirmed')
+      and (b_ref.status = 'confirmed' or b_ref.locked_until > v_now)
+      and tstzrange(b_ref.kezdes_ideje, b_ref.vege_ideje, '[)')
+          && tstzrange(p_start, p_end, '[)')
+      and (
+        (
+          select count(*)
+          from public.bookings b2
+          where b2.cég_id = p_company_id
+            and b2.status in ('pending', 'confirmed')
+            and (b2.status = 'confirmed' or b2.locked_until > v_now)
+            and b2.kezdes_ideje <= greatest(p_start, b_ref.kezdes_ideje)
+            and b2.vege_ideje > greatest(p_start, b_ref.kezdes_ideje)
+        ) + coalesce((
+          select sum(coalesce(m.blocked_threads, v_capacity))
+          from public.manual_blockouts m
+          where m.cég_id = p_company_id
+            and m.kezdes_ideje <= greatest(p_start, b_ref.kezdes_ideje)
+            and m.vege_ideje > greatest(p_start, b_ref.kezdes_ideje)
+        ), 0) + v_threads_to_block
+      ) > v_capacity
+  ) then
+    raise exception 'The blockout conflicts with an active booking.';
+  end if;
+
+  insert into public.manual_blockouts (
+    cég_id,
+    kezdes_ideje,
+    vege_ideje,
+    megjegyzes,
+    blocked_threads
+  )
+  values (
+    p_company_id,
+    p_start,
+    p_end,
+    nullif(trim(p_note), ''),
+    case when v_threads_to_block >= v_capacity then null else v_threads_to_block end
+  )
+  returning id into v_blockout_id;
+
+  return v_blockout_id;
+end;
+$$;
+
+revoke all on function public.add_manual_blockout(uuid, timestamptz, timestamptz, text, integer) from public, anon;
+grant execute on function public.add_manual_blockout(uuid, timestamptz, timestamptz, text, integer) to authenticated;
+
 -- 3. Update list_available_slots to respect max_concurrent_bookings
 create or replace function public.list_available_slots(
   p_company_id uuid,
@@ -95,31 +209,32 @@ begin
     and h.weekday = extract(dow from p_day)::smallint
     and (local_slots.local_start at time zone v_timezone) > v_now
     and (
-      select count(*)
-      from public.bookings b
-      where b.cég_id = p_company_id
-        and b.status in ('pending', 'confirmed')
-        and (b.status = 'confirmed' or b.locked_until > v_now)
-        and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
-            && tstzrange(
-              local_slots.local_start at time zone v_timezone,
-              (local_slots.local_start at time zone v_timezone)
-                + make_interval(mins => v_slot_duration),
-              '[)'
-            )
+      (
+        select count(*)
+        from public.bookings b
+        where b.cég_id = p_company_id
+          and b.status in ('pending', 'confirmed')
+          and (b.status = 'confirmed' or b.locked_until > v_now)
+          and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
+              && tstzrange(
+                local_slots.local_start at time zone v_timezone,
+                (local_slots.local_start at time zone v_timezone)
+                  + make_interval(mins => v_slot_duration),
+                '[)'
+              )
+      ) + coalesce((
+        select sum(coalesce(m.blocked_threads, v_capacity))
+        from public.manual_blockouts m
+        where m.cég_id = p_company_id
+          and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
+              && tstzrange(
+                local_slots.local_start at time zone v_timezone,
+                (local_slots.local_start at time zone v_timezone)
+                  + make_interval(mins => v_slot_duration),
+                '[)'
+              )
+      ), 0)
     ) < v_capacity
-    and not exists (
-      select 1
-      from public.manual_blockouts m
-      where m.cég_id = p_company_id
-        and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
-            && tstzrange(
-              local_slots.local_start at time zone v_timezone,
-              (local_slots.local_start at time zone v_timezone)
-                + make_interval(mins => v_slot_duration),
-              '[)'
-            )
-    )
   order by local_slots.local_start;
 end;
 $$;
@@ -211,31 +326,32 @@ begin
   select local_slots.slot_start,
          local_slots.slot_start > v_now
          and (
-           select count(*)
-           from public.bookings b
-           where b.cég_id = p_company_id
-             and b.status in ('pending', 'confirmed')
-             and (b.status = 'confirmed' or b.locked_until > v_now)
-             and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
-                 && tstzrange(
-                   local_slots.slot_start,
-                   local_slots.slot_start
-                     + make_interval(mins => v_slot_duration),
-                   '[)'
-                 )
+           (
+             select count(*)
+             from public.bookings b
+             where b.cég_id = p_company_id
+               and b.status in ('pending', 'confirmed')
+               and (b.status = 'confirmed' or b.locked_until > v_now)
+               and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
+                   && tstzrange(
+                     local_slots.slot_start,
+                     local_slots.slot_start
+                       + make_interval(mins => v_slot_duration),
+                     '[)'
+                   )
+           ) + coalesce((
+             select sum(coalesce(m.blocked_threads, v_capacity))
+             from public.manual_blockouts m
+             where m.cég_id = p_company_id
+               and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
+                   && tstzrange(
+                     local_slots.slot_start,
+                     local_slots.slot_start
+                       + make_interval(mins => v_slot_duration),
+                     '[)'
+                   )
+           ), 0)
          ) < v_capacity
-         and not exists (
-           select 1
-           from public.manual_blockouts m
-           where m.cég_id = p_company_id
-             and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
-                 && tstzrange(
-                   local_slots.slot_start,
-                   local_slots.slot_start
-                     + make_interval(mins => v_slot_duration),
-                   '[)'
-                 )
-         )
   from local_slots
   order by local_slots.slot_start;
 end;
@@ -451,20 +567,22 @@ begin
   end if;
 
   if (
-    select count(*)
-    from public.bookings b
-    where b.cég_id = p_company_id
-      and b.status in ('pending', 'confirmed')
-      and (b.status = 'confirmed' or b.locked_until > v_now)
-      and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
-          && tstzrange(p_start, p_start + make_interval(mins => v_slot_duration), '[)')
-  ) >= greatest(1, coalesce(v_company.max_concurrent_bookings, 1)) or exists (
-    select 1
-    from public.manual_blockouts m
-    where m.cég_id = p_company_id
-      and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
-          && tstzrange(p_start, p_start + make_interval(mins => v_slot_duration), '[)')
-  ) then
+    (
+      select count(*)
+      from public.bookings b
+      where b.cég_id = p_company_id
+        and b.status in ('pending', 'confirmed')
+        and (b.status = 'confirmed' or b.locked_until > v_now)
+        and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
+            && tstzrange(p_start, p_start + make_interval(mins => v_slot_duration), '[)')
+    ) + coalesce((
+      select sum(coalesce(m.blocked_threads, greatest(1, coalesce(v_company.max_concurrent_bookings, 1))))
+      from public.manual_blockouts m
+      where m.cég_id = p_company_id
+        and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
+            && tstzrange(p_start, p_start + make_interval(mins => v_slot_duration), '[)')
+    ), 0)
+  ) >= greatest(1, coalesce(v_company.max_concurrent_bookings, 1)) then
     raise exception 'The selected time is no longer available.';
   end if;
 
@@ -520,6 +638,9 @@ declare
   v_service_count integer;
   v_booking_id uuid;
   v_position integer;
+  v_capacity integer;
+  v_overlapping_bookings integer;
+  v_overlapping_blocked integer;
   v_now timestamptz := clock_timestamp();
 begin
   if auth.uid() is null then
@@ -564,23 +685,30 @@ begin
   v_slot_duration :=
     ceil(v_duration::numeric / v_company.slot_interval_minutes)::integer
       * v_company.slot_interval_minutes;
+  v_capacity := greatest(1, coalesce(v_company.max_concurrent_bookings, 1));
 
-  if (
-    select count(*)
-    from public.bookings b
-    where b.cég_id = p_company_id
-      and b.status in ('pending', 'confirmed')
-      and (b.status = 'confirmed' or b.locked_until > v_now)
-      and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
-          && tstzrange(p_start, p_start + make_interval(mins => v_slot_duration), '[)')
-  ) >= greatest(1, coalesce(v_company.max_concurrent_bookings, 1)) or exists (
-    select 1
-    from public.manual_blockouts m
-    where m.cég_id = p_company_id
-      and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
-          && tstzrange(p_start, p_start + make_interval(mins => v_slot_duration), '[)')
-  ) then
-    raise exception 'The selected time slot conflicts with an existing booking or blockout.';
+  select count(*)::integer
+    into v_overlapping_bookings
+  from public.bookings b
+  where b.cég_id = p_company_id
+    and b.status in ('pending', 'confirmed')
+    and (b.status = 'confirmed' or b.locked_until > v_now)
+    and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
+        && tstzrange(p_start, p_start + make_interval(mins => v_slot_duration), '[)');
+
+  select coalesce(sum(coalesce(m.blocked_threads, v_capacity)), 0)::integer
+    into v_overlapping_blocked
+  from public.manual_blockouts m
+  where m.cég_id = p_company_id
+    and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
+        && tstzrange(p_start, p_start + make_interval(mins => v_slot_duration), '[)');
+
+  if v_overlapping_blocked >= v_capacity then
+    raise exception 'The selected time slot falls within a blocked period.';
+  elsif v_overlapping_bookings >= v_capacity then
+    raise exception 'The selected time slot is already fully booked.';
+  elsif v_overlapping_bookings + v_overlapping_blocked >= v_capacity then
+    raise exception 'There is no free thread capacity left for the selected time slot.';
   end if;
 
   insert into public.bookings (
@@ -650,6 +778,9 @@ declare
   v_slot_duration integer;
   v_new_end timestamptz;
   v_target_staff uuid;
+  v_capacity integer;
+  v_overlapping_bookings integer;
+  v_overlapping_blocked integer;
   v_now timestamptz := clock_timestamp();
 begin
   if auth.uid() is null then
@@ -691,37 +822,45 @@ begin
       * v_company.slot_interval_minutes;
   v_new_end := p_new_start + make_interval(mins => v_duration_minutes);
   v_target_staff := coalesce(p_staff_id, v_booking.staff_id);
+  v_capacity := greatest(1, coalesce(v_company.max_concurrent_bookings, 1));
 
-  if (
-    v_target_staff is not null
-    and exists (
-      select 1
-      from public.bookings b
-      where b.cég_id = v_company.id
-        and b.id <> v_booking.id
-        and b.staff_id = v_target_staff
-        and b.status in ('pending', 'confirmed')
-        and (b.status = 'confirmed' or b.locked_until > v_now)
-        and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
-            && tstzrange(p_new_start, p_new_start + make_interval(mins => v_slot_duration), '[)')
-    )
-  ) or (
-    select count(*)
+  if v_target_staff is not null and exists (
+    select 1
     from public.bookings b
     where b.cég_id = v_company.id
       and b.id <> v_booking.id
+      and b.staff_id = v_target_staff
       and b.status in ('pending', 'confirmed')
       and (b.status = 'confirmed' or b.locked_until > v_now)
       and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
           && tstzrange(p_new_start, p_new_start + make_interval(mins => v_slot_duration), '[)')
-  ) >= greatest(1, coalesce(v_company.max_concurrent_bookings, 1)) or exists (
-    select 1
-    from public.manual_blockouts m
-    where m.cég_id = v_company.id
-      and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
-          && tstzrange(p_new_start, p_new_start + make_interval(mins => v_slot_duration), '[)')
   ) then
-    raise exception 'The selected time slot conflicts with an existing booking or blockout.';
+    raise exception 'The selected staff member already has a booking in this time slot.';
+  end if;
+
+  select count(*)::integer
+    into v_overlapping_bookings
+  from public.bookings b
+  where b.cég_id = v_company.id
+    and b.id <> v_booking.id
+    and b.status in ('pending', 'confirmed')
+    and (b.status = 'confirmed' or b.locked_until > v_now)
+    and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
+        && tstzrange(p_new_start, p_new_start + make_interval(mins => v_slot_duration), '[)');
+
+  select coalesce(sum(coalesce(m.blocked_threads, v_capacity)), 0)::integer
+    into v_overlapping_blocked
+  from public.manual_blockouts m
+  where m.cég_id = v_company.id
+    and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
+        && tstzrange(p_new_start, p_new_start + make_interval(mins => v_slot_duration), '[)');
+
+  if v_overlapping_blocked >= v_capacity then
+    raise exception 'The selected time slot falls within a blocked period.';
+  elsif v_overlapping_bookings >= v_capacity then
+    raise exception 'The selected time slot is already fully booked.';
+  elsif v_overlapping_bookings + v_overlapping_blocked >= v_capacity then
+    raise exception 'There is no free thread capacity left for the selected time slot.';
   end if;
 
   update public.bookings
@@ -947,21 +1086,23 @@ begin
             && tstzrange(p_new_start, p_new_start + make_interval(mins => v_slot_duration), '[)')
     )
   ) or (
-    select count(*)
-    from public.bookings b
-    where b.cég_id = v_company.id
-      and b.id <> v_booking.id
-      and b.status in ('pending', 'confirmed')
-      and (b.status = 'confirmed' or b.locked_until > v_now)
-      and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
-          && tstzrange(p_new_start, p_new_start + make_interval(mins => v_slot_duration), '[)')
-  ) >= greatest(1, coalesce(v_company.max_concurrent_bookings, 1)) or exists (
-    select 1
-    from public.manual_blockouts m
-    where m.cég_id = v_company.id
-      and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
-          && tstzrange(p_new_start, p_new_start + make_interval(mins => v_slot_duration), '[)')
-  ) then
+    (
+      select count(*)
+      from public.bookings b
+      where b.cég_id = v_company.id
+        and b.id <> v_booking.id
+        and b.status in ('pending', 'confirmed')
+        and (b.status = 'confirmed' or b.locked_until > v_now)
+        and tstzrange(b.kezdes_ideje, b.vege_ideje, '[)')
+            && tstzrange(p_new_start, p_new_start + make_interval(mins => v_slot_duration), '[)')
+    ) + coalesce((
+      select sum(coalesce(m.blocked_threads, greatest(1, coalesce(v_company.max_concurrent_bookings, 1))))
+      from public.manual_blockouts m
+      where m.cég_id = v_company.id
+        and tstzrange(m.kezdes_ideje, m.vege_ideje, '[)')
+            && tstzrange(p_new_start, p_new_start + make_interval(mins => v_slot_duration), '[)')
+    ), 0)
+  ) >= greatest(1, coalesce(v_company.max_concurrent_bookings, 1)) then
     raise exception 'The selected new time slot is no longer available.';
   end if;
 

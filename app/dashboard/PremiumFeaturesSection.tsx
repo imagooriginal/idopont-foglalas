@@ -188,6 +188,7 @@ export default function PremiumFeaturesSection({
             <input
               className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-normal"
               defaultValue={cancellationWindowHours}
+              key={`cancel-${companyId}-${cancellationWindowHours}`}
               max={168}
               min={0}
               name="cancellationWindowHours"
@@ -203,6 +204,7 @@ export default function PremiumFeaturesSection({
             <input
               className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-normal"
               defaultValue={maxConcurrentBookings}
+              key={`cap-${companyId}-${maxConcurrentBookings}`}
               max={50}
               min={1}
               name="maxConcurrentBookings"
