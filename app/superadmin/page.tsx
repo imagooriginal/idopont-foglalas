@@ -109,6 +109,7 @@ export default async function SuperadminPage({
 
   return (
     <SuperadminConsole
+      adminEmail={authData.user.email ?? ""}
       authUsers={authUsers}
       companies={companies}
       ownerEmails={Object.fromEntries(ownerEmails)}

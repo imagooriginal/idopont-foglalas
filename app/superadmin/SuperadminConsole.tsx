@@ -27,6 +27,7 @@ import {
   createTenantAction,
   reorderServicesAction,
   setPlatformServiceActiveAction,
+  signOutAction,
   updateTenantPlanAction,
   updateTenantStatusAction,
   updatePlatformServiceAction,
@@ -138,17 +139,18 @@ function Metric({
 }
 
 function ActionMessage({ state }: { state: SuperadminActionState }) {
+  const { t } = useLanguage();
   if (state.error) {
     return (
       <p className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">
-        {state.error}
+        {t(state.error)}
       </p>
     );
   }
   if (state.success) {
     return (
       <p className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800" role="status">
-        {state.success}
+        {t(state.success)}
       </p>
     );
   }
@@ -1101,6 +1103,7 @@ export default function SuperadminConsole({
   services,
   totalAuthUsers,
   authUsers = [],
+  adminEmail = "",
 }: {
   companies: SuperadminCompany[];
   ownerEmails: Record<string, string>;
@@ -1108,6 +1111,7 @@ export default function SuperadminConsole({
   services: SuperadminService[];
   totalAuthUsers: number;
   authUsers?: SuperadminAuthUser[];
+  adminEmail?: string;
 }) {
   const router = useRouter();
   const { t } = useLanguage();
@@ -1167,6 +1171,12 @@ export default function SuperadminConsole({
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
+            {adminEmail && (
+              <span className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600 shadow-xs">
+                {t("Bejelentkezve", "Signed in")}:{" "}
+                <strong className="font-semibold text-slate-900">{adminEmail}</strong>
+              </span>
+            )}
             <LanguageSwitcher />
             <Link
               className="w-fit rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
@@ -1174,6 +1184,14 @@ export default function SuperadminConsole({
             >
               {t("Szolgáltatói dashboard", "Provider Dashboard")}
             </Link>
+            <form action={signOutAction}>
+              <button
+                className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-600 shadow-sm transition hover:bg-slate-50 hover:text-slate-950"
+                type="submit"
+              >
+                {t("Kijelentkezés", "Sign out")}
+              </button>
+            </form>
           </div>
         </header>
 

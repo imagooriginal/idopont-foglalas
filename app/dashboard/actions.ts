@@ -214,6 +214,23 @@ async function getSuperadminClients() {
   return { supabase, admin: createSupabaseAdminClient() };
 }
 
+/**
+ * Returns a contextual Hungarian error when platform-admin privileges are missing,
+ * naming the active browser session email if a non-admin account overwrote the cookie.
+ */
+async function buildSuperadminAccessDeniedError(): Promise<string> {
+  try {
+    const supabase = await createSupabaseServerClient();
+    const { data: authData } = await supabase.auth.getUser();
+    if (authData?.user?.email) {
+      return `A művelethez platform-admin jogosultság szükséges (jelenleg a(z) ${authData.user.email} fiók van bejelentkezve ebben a böngészőben – jelentkezz ki, vagy a teszt-szolgáltatót inkognitó ablakban nyisd meg!).`;
+    }
+  } catch {
+    // Fall back to default message
+  }
+  return "A művelethez platform-admin jogosultság szükséges.";
+}
+
 interface TenantCompanyPermissions {
   id: string;
   owner_id: string;
@@ -373,7 +390,7 @@ export async function createTenantAction(
 
   const clients = await getSuperadminClients();
   if (!clients) {
-    return { error: "A művelethez platform-admin jogosultság szükséges." };
+    return { error: await buildSuperadminAccessDeniedError() };
   }
 
   const { data: existingCompany, error: slugError } = await clients.admin
@@ -532,7 +549,7 @@ export async function updateTenantSettingsAction(
 
   const clients = await getSuperadminClients();
   if (!clients) {
-    return { error: "A művelethez platform-admin jogosultság szükséges." };
+    return { error: await buildSuperadminAccessDeniedError() };
   }
 
   const { data: conflictingCompany, error: slugError } = await clients.admin
@@ -623,7 +640,7 @@ export async function updateTenantPlanAction(
 
   const clients = await getSuperadminClients();
   if (!clients) {
-    return { error: "A művelethez platform-admin jogosultság szükséges." };
+    return { error: await buildSuperadminAccessDeniedError() };
   }
   const { error } = await clients.admin
     .from("companies")
@@ -661,7 +678,7 @@ export async function updateTenantStatusAction(
 
   const clients = await getSuperadminClients();
   if (!clients) {
-    return { error: "A művelethez platform-admin jogosultság szükséges." };
+    return { error: await buildSuperadminAccessDeniedError() };
   }
   const { error } = await clients.supabase.rpc("set_company_status", {
     p_company_id: parsed.data.companyId,
@@ -700,7 +717,7 @@ export async function createServiceAction(
 
   const clients = await getSuperadminClients();
   if (!clients) {
-    return { error: "A művelethez platform-admin jogosultság szükséges." };
+    return { error: await buildSuperadminAccessDeniedError() };
   }
 
   const { data: lastService, error: orderError } = await clients.admin
@@ -764,7 +781,7 @@ export async function updatePlatformServiceAction(
 
   const clients = await getSuperadminClients();
   if (!clients) {
-    return { error: "A művelethez platform-admin jogosultság szükséges." };
+    return { error: await buildSuperadminAccessDeniedError() };
   }
   const { data, error } = await clients.admin
     .from("services")
@@ -811,7 +828,7 @@ export async function setPlatformServiceActiveAction(
 
   const clients = await getSuperadminClients();
   if (!clients) {
-    return { error: "A művelethez platform-admin jogosultság szükséges." };
+    return { error: await buildSuperadminAccessDeniedError() };
   }
   const { data, error } = await clients.admin
     .from("services")
@@ -855,7 +872,7 @@ export async function reorderServicesAction(
 
   const clients = await getSuperadminClients();
   if (!clients) {
-    return { error: "A művelethez platform-admin jogosultság szükséges." };
+    return { error: await buildSuperadminAccessDeniedError() };
   }
   const { error } = await clients.supabase.rpc("reorder_company_services", {
     p_company_id: parsed.data.companyId,

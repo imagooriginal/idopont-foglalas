@@ -289,12 +289,12 @@ export default function BlockoutManager({
 
             {state.error && (
               <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700" role="alert">
-                {state.error}
+                {t(state.error)}
               </p>
             )}
             {state.success && (
               <p className="rounded-lg bg-green-50 p-3 text-sm text-green-800" role="status">
-                {state.success}
+                {t(state.success)}
               </p>
             )}
 

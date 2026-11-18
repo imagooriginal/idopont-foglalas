@@ -21,7 +21,7 @@ export default function LoginForm() {
       <form action={action} className="space-y-5">
         {state.error && (
           <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
-            {state.error}
+            {t(state.error)}
           </p>
         )}
         <label className="block space-y-2 text-sm font-medium text-slate-700">
@@ -81,10 +81,10 @@ export default function LoginForm() {
               type="email"
             />
             {resetState.error && (
-              <p className="text-xs font-semibold text-red-600">{resetState.error}</p>
+              <p className="text-xs font-semibold text-red-600">{t(resetState.error)}</p>
             )}
             {resetState.success && (
-              <p className="text-xs font-semibold text-emerald-700">{resetState.success}</p>
+              <p className="text-xs font-semibold text-emerald-700">{t(resetState.success)}</p>
             )}
             <button
               className="w-full rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50"

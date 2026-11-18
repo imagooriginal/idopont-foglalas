@@ -6,7 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import BookingWidget from "../components/BookingWidget";
 import LanguageSwitcher from "../components/LanguageSwitcher";
 import PremiumFeaturesSection from "../app/dashboard/PremiumFeaturesSection";
-import { resetLocaleForTests } from "../lib/i18n";
+import {
+  resetLocaleForTests,
+  setLocale,
+  translateDynamicText,
+  useLanguage,
+} from "../lib/i18n";
 import {
   deliverBookingReminderEmail,
   deliverGoogleReviewEmail,
@@ -76,6 +81,7 @@ import {
   createBlockoutAction,
   createManualBookingAction,
   createStaffMemberAction,
+  createTenantAction,
   createTenantServiceAction,
   markBookingNoShowAction,
   rescheduleBookingByProviderAction,
@@ -1319,6 +1325,71 @@ describe("Starter vs. Pro (Prémium) Tier Separation, Security & Business Featur
       expect(
         screen.getByText("1 szál szabadságon / szüneten (marad 2 aktív szál)"),
       ).toBeInTheDocument();
+    });
+
+    it("translates error messages into English when locale is EN and reports active session email on superadmin permission mismatch", async () => {
+      // 1. Static & dynamic error translations in EN and reverse HU
+      const enPlatform = translateDynamicText(
+        "A művelethez platform-admin jogosultság szükséges.",
+        "en",
+      );
+      expect(enPlatform).toBe(
+        "Platform admin privileges are required for this action.",
+      );
+      expect(translateDynamicText(enPlatform, "hu")).toBe(
+        "A művelethez platform-admin jogosultság szükséges.",
+      );
+
+      expect(
+        translateDynamicText(
+          "A bejelentkezés nem sikerült. Ellenőrizd az adatokat.",
+          "en",
+        ),
+      ).toBe("Sign-in failed. Please check your credentials.");
+
+      expect(
+        translateDynamicText(
+          "A kézi foglalás mentése nem sikerült: A kiválasztott idősáv blokkolva van (zárvatartás / szabadság).",
+          "en",
+        ),
+      ).toBe(
+        "Failed to save manual booking: The selected time slot is blocked (time-off / closure).",
+      );
+
+      // 2. Superadmin action names the active non-admin session email when cookie was overwritten
+      serverSupabaseMock.auth.getUser.mockResolvedValue({
+        data: { user: { id: "other-user", email: "user+matek@gmail.com" } },
+        error: null,
+      });
+      serverSupabaseMock.rpc.mockResolvedValue({ data: false, error: null });
+
+      const tenantForm = new FormData();
+      tenantForm.set("name", "Matek Bt");
+      tenantForm.set("slug", "matek-bt");
+      tenantForm.set("ownerEmail", "user+matek@gmail.com");
+      tenantForm.set("primaryColor", "#1d4ed8");
+      tenantForm.set("plan", "starter");
+      tenantForm.set("openingTime", "08:00");
+      tenantForm.set("closingTime", "17:00");
+      tenantForm.set("timeZone", "Europe/Budapest");
+      tenantForm.set("slotIntervalMinutes", "15");
+      tenantForm.set("maxConcurrentBookings", "1");
+      tenantForm.set("cancellationWindowHours", "24");
+
+      const tenantRes = await createTenantAction({}, tenantForm);
+      expect(tenantRes.error).toContain("user+matek@gmail.com");
+
+      // 3. useLanguage().t translates the dynamic error cleanly when switched to EN
+      function ErrorBannerProbe({ message }: { message: string }) {
+        const { t } = useLanguage();
+        return <p role="alert">{t(message)}</p>;
+      }
+
+      setLocale("en");
+      render(<ErrorBannerProbe message={tenantRes.error ?? ""} />);
+      expect(screen.getByRole("alert").textContent).toContain(
+        "Platform admin privileges are required (currently signed in as user+matek@gmail.com",
+      );
     });
   });
 });

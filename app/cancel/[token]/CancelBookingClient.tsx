@@ -158,7 +158,7 @@ export default function CancelBookingClient({
           className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700"
           role="alert"
         >
-          {error}
+          {t(error)}
         </p>
       )}
 

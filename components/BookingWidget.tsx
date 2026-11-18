@@ -502,7 +502,7 @@ export default function BookingWidget({
 
       {error && (
         <p className="mb-5 rounded-lg bg-red-50 p-3 text-sm text-red-800" role="alert">
-          {error}
+          {t(error)}
         </p>
       )}
 

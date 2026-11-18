@@ -42,7 +42,7 @@ export default async function DashboardLoginPage() {
           Szolgáltatói belépés
         </h1>
         <p className="mb-7 mt-2 text-slate-600">
-          Jelentkezz be a foglalások és a műhely szüneteinek kezeléséhez.
+          Jelentkezz be a foglalások kezeléséhez.
         </p>
         <LoginForm />
       </section>
